@@ -1,6 +1,9 @@
+cargo-features = ["edition"]
+
 [package]
 name = "clink"
 version = "0.0.1"
+edition = "2018"
 authors = ["Kathryn Long <squeeself@gmail.com>"]
 publish = false
 
