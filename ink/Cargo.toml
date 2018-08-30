@@ -1,0 +1,6 @@
+[package]
+name = "ink"
+version = "0.0.1"
+authors = ["Kathryn Long <squeeself@gmail.com>"]
+
+[dependencies]
