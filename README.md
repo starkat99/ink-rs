@@ -1,4 +1,5 @@
 # Rust ink player and runtime
+[![Build Status](https://travis-ci.org/starkat99/ink-rs.svg?branch=master)](https://travis-ci.org/starkat99/ink-rs) [![Build status](https://ci.appveyor.com/api/projects/status/icmpsdf6m2dwd9ky/branch/master?svg=true)](https://ci.appveyor.com/project/starkat99/ink-rs/branch/master)
 
 See https://github.com/inkle/ink
 

@@ -1,4 +1,11 @@
 [[package]]
-name = "rink"
-version = "0.1.0"
+name = "clink"
+version = "0.0.1"
+dependencies = [
+ "ink 0.0.1",
+]
+
+[[package]]
+name = "ink"
+version = "0.0.1"
 

@@ -5,5 +5,6 @@ authors = ["Kathryn Long <squeeself@gmail.com>"]
 publish = false
 
 [dependencies]
+ink = { path = "ink" }
 
 [workspace]
