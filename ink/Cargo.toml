@@ -8,3 +8,8 @@ authors = ["Kathryn Long <squeeself@gmail.com>"]
 publish = false
 
 [dependencies]
+serde = "1.0"
+serde_derive = "1.0"
+serde_json = "1.0"
+log = "0.4.1"
+failure = "0.1.2"

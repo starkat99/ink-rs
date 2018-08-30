@@ -9,5 +9,9 @@ publish = false
 
 [dependencies]
 ink = { path = "ink" }
+clap = "2.32"
+failure = "0.1.2"
+log = "0.4.1"
+simple-logging = "2.0"
 
 [workspace]
