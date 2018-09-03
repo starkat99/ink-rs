@@ -69,13 +69,13 @@ fn main() -> Fallible<()> {
         // TODO: Does not currently support compiling from non-JSON files
         bail!("ERROR: Compiling .ink files is not implemented yet!");
     } else {
-        Story::from_reader(File::open(infile)?)?
+        Story::read_json(File::open(infile)?)?
     };
 
     // Write output
     for &outfile in args.value_of_os("output").map(Path::new).iter() {
         if outfile != infile {
-            story.to_writer(File::create(outfile)?)?
+            story.write_json(File::create(outfile)?)?
         }
     }
 
