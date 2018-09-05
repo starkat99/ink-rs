@@ -6,6 +6,7 @@ use super::{
     Story, Value, VariableAssignment, VariableReference, VariableScope,
 };
 use failure::{bail, ensure, Fallible};
+use internship::IStr;
 use log::{trace, warn};
 use serde_json::json;
 use std::collections::HashMap;
@@ -62,16 +63,15 @@ pub(crate) fn value_to_container(
 
         // The last container element has the named contents, as well as special container fields
         let maybe_last = &array[array.len() - 1].as_object();
-        let mut named_only_content = HashMap::<String, RuntimeObject>::with_capacity(
-            maybe_last.map_or(0, |last| last.len()),
-        );
+        let mut named_only_content =
+            HashMap::<IStr, RuntimeObject>::with_capacity(maybe_last.map_or(0, |last| last.len()));
         if let Some(last) = maybe_last {
             for (key, value) in last.iter() {
                 if key == "#n" || key == "#f" {
                     continue;
                 }
                 named_only_content
-                    .insert(key.to_owned(), value_to_runtime_object(value, Some(key))?);
+                    .insert(key[..].into(), value_to_runtime_object(value, Some(key))?);
             }
         }
 
@@ -82,7 +82,7 @@ pub(crate) fn value_to_container(
                 maybe_last
                     .and_then(|last| last.get("#n"))
                     .and_then(|v| v.as_str())
-            }).map(|s| s.to_owned());
+            }).map(|s| s.into());
         let count_flags = maybe_last
             .and_then(|last| last.get("#f"))
             .and_then(|v| v.as_i64())
@@ -114,7 +114,7 @@ fn object_to_runtime_object(
                 Some(context) => VariableScope::Callstack((context - 1) as u32),
                 _ => VariableScope::Unknown,
             };
-            Value(Value::VariablePointer(var.to_owned(), scope))
+            Value(Value::VariablePointer(var.into(), scope))
         }
         // Divert
         else if let Some(divert_target) = obj
@@ -141,7 +141,7 @@ fn object_to_runtime_object(
             Divert(if obj.contains_key("var") {
                 Divert {
                     target_path: None,
-                    var_divert_name: Some(divert_target.to_owned()),
+                    var_divert_name: Some(divert_target.into()),
                     pushes_to_stack,
                     stack_push_type,
                     external,
@@ -178,7 +178,7 @@ fn object_to_runtime_object(
         // Variable References
         else if let Some(name) = obj.get("VAR?").and_then(|v| v.as_str()) {
             Variable(VariableReference {
-                name: Some(name.to_owned()),
+                name: Some(name.into()),
                 path_for_count: None,
             })
         } else if let Some(path) = obj.get("CNT?").and_then(|v| v.as_str()).map(Path::from_str) {
@@ -196,14 +196,14 @@ fn object_to_runtime_object(
             let global = obj.contains_key("VAR=");
             let new_declaration = !obj.contains_key("re");
             Assignment(VariableAssignment {
-                name: name.to_owned(),
+                name: name.into(),
                 new_declaration,
                 global,
             })
         }
         // Tag
         else if let Some(text) = obj.get("#").and_then(|v| v.as_str()) {
-            Tag(text.to_owned())
+            Tag(text.into())
         }
         // List
         else if let Some(map) = obj.get("list").and_then(|v| v.as_object()) {
@@ -211,12 +211,12 @@ fn object_to_runtime_object(
                 values
                     .iter()
                     .filter_map(|v| v.as_str())
-                    .map(|v| v.to_owned())
+                    .map(|v| v.into())
                     .collect()
             });
             let mut content: HashMap<ListItem, i32> = HashMap::with_capacity(map.len());
             for (key, val) in map {
-                content.insert(ListItem(key.to_owned()), val.as_i64().unwrap_or(0) as i32);
+                content.insert(ListItem(key[..].into()), val.as_i64().unwrap_or(0) as i32);
             }
             Value(Value::List(List {
                 content,
@@ -243,8 +243,8 @@ fn value_to_runtime_object(
         Array(_) => Container(value_to_container(value, name)?),
         Object(obj) => object_to_runtime_object(obj)?,
         // Regular string values
-        String(s) if s.starts_with("^") => Value(Value::String(s[1..].to_owned())),
-        String(s) if s == "\n" => Value(Value::String(s.clone())),
+        String(s) if s.starts_with("^") => Value(Value::String(s[1..].into())),
+        String(s) if s == "\n" => Value(Value::String("\n".into())),
         // TODO Could match the strings faster with hash tables
         // Control commands
         String(s) if s == "ev" => Control(ControlCommand::EvalStart),

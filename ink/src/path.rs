@@ -1,9 +1,10 @@
+use internship::IStr;
 use std::slice::SliceIndex;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PathComponent {
     Index(u32),
-    Name(String),
+    Name(IStr),
     Parent,
 }
 
@@ -272,7 +273,7 @@ impl PathComponent {
         } else if s == "^" {
             Some(PathComponent::Parent)
         } else if !s.is_empty() && !s.contains(".") {
-            Some(PathComponent::Name(s.to_owned()))
+            Some(PathComponent::Name(s.into()))
         } else {
             None
         }

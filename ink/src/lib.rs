@@ -2,6 +2,7 @@
 use bitflags::bitflags;
 use encoding_rs_io::DecodeReaderBytes;
 use failure::{Fail, Fallible};
+use internship::IStr;
 use std::{
     collections::HashMap,
     io::{Read, Write},
@@ -35,37 +36,37 @@ pub enum RuntimeObject {
     Choice(ChoicePoint),
     Variable(VariableReference),
     Assignment(VariableAssignment),
-    Tag(String),
+    Tag(IStr),
     Glue,
     Void,
 }
 
 #[derive(Debug, Clone)]
 pub struct Container {
-    name: Option<String>,
+    name: Option<IStr>,
     count_flags: CountFlags,
     content: Vec<RuntimeObject>,
-    named_only_content: HashMap<String, RuntimeObject>,
+    named_only_content: HashMap<IStr, RuntimeObject>,
 }
 
 #[derive(Debug, Clone)]
 pub enum Value {
     Int(i32),
     Float(f32),
-    String(String),
+    String(IStr),
     DivertTarget(Path),
-    VariablePointer(String, VariableScope),
+    VariablePointer(IStr, VariableScope),
     List(List),
 }
 
 #[derive(Debug, Clone)]
 pub struct List {
     content: HashMap<ListItem, i32>,
-    origin_names: Option<Vec<String>>,
+    origin_names: Option<Vec<IStr>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ListItem(String);
+pub struct ListItem(IStr);
 
 #[derive(Debug, Clone)]
 pub enum ControlCommand {
@@ -147,7 +148,7 @@ pub enum PushPopType {
 #[derive(Debug, Clone)]
 pub struct Divert {
     target_path: Option<Path>,
-    var_divert_name: Option<String>,
+    var_divert_name: Option<IStr>,
     pushes_to_stack: bool,
     stack_push_type: PushPopType,
     external: bool,
@@ -163,13 +164,13 @@ pub struct ChoicePoint {
 
 #[derive(Debug, Clone)]
 pub struct VariableReference {
-    name: Option<String>,
+    name: Option<IStr>,
     path_for_count: Option<Path>,
 }
 
 #[derive(Debug, Clone)]
 pub struct VariableAssignment {
-    name: String,
+    name: IStr,
     new_declaration: bool,
     global: bool,
 }
@@ -226,15 +227,6 @@ impl RuntimeObject {
         match self {
             RuntimeObject::Container(c) => c.name.as_ref().map(|s| s.as_ref()),
             _ => None,
-        }
-    }
-}
-
-impl Container {
-    pub fn new(name: Option<String>) -> Self {
-        Container {
-            name: name,
-            ..Container::default()
         }
     }
 }
