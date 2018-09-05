@@ -1,9 +1,9 @@
 use super::{
     ChoiceFlags, ChoicePoint, Container, ControlCommand, CountFlags, Divert,
     Error::*,
-    List, ListItem, NativeFunction, Path, PushPopType,
-    RuntimeObject::{self, *},
-    Story, Value, VariableAssignment, VariableReference, VariableScope,
+    List, ListItem, NativeFunction,
+    Object::{self, *},
+    Path, PushPopType, Story, Value, VariableAssignment, VariableReference, VariableScope,
 };
 use failure::{bail, ensure, Fallible};
 use internship::IStr;
@@ -56,22 +56,21 @@ pub(crate) fn value_to_container(
         Ok(Container::default())
     } else {
         // Deserialize all unnamed contents, skipping the special last array element
-        let mut content = Vec::<RuntimeObject>::with_capacity(array.len() - 1);
+        let mut content = Vec::<Object>::with_capacity(array.len() - 1);
         for value in &array[..array.len() - 1] {
-            content.push(value_to_runtime_object(value, None)?);
+            content.push(value_to_ink_object(value, None)?);
         }
 
         // The last container element has the named contents, as well as special container fields
         let maybe_last = &array[array.len() - 1].as_object();
         let mut named_only_content =
-            HashMap::<IStr, RuntimeObject>::with_capacity(maybe_last.map_or(0, |last| last.len()));
+            HashMap::<IStr, Object>::with_capacity(maybe_last.map_or(0, |last| last.len()));
         if let Some(last) = maybe_last {
             for (key, value) in last.iter() {
                 if key == "#n" || key == "#f" {
                     continue;
                 }
-                named_only_content
-                    .insert(key[..].into(), value_to_runtime_object(value, Some(key))?);
+                named_only_content.insert(key[..].into(), value_to_ink_object(value, Some(key))?);
             }
         }
 
@@ -98,9 +97,7 @@ pub(crate) fn value_to_container(
     }
 }
 
-fn object_to_runtime_object(
-    obj: &serde_json::Map<String, serde_json::Value>,
-) -> Fallible<RuntimeObject> {
+fn json_object_to_ink_object(obj: &serde_json::Map<String, serde_json::Value>) -> Fallible<Object> {
     // Not really an easy way to do this
     Ok(
         // DivertTarget
@@ -228,10 +225,7 @@ fn object_to_runtime_object(
     )
 }
 
-fn value_to_runtime_object(
-    value: &serde_json::Value,
-    name: Option<&str>,
-) -> Fallible<RuntimeObject> {
+fn value_to_ink_object(value: &serde_json::Value, name: Option<&str>) -> Fallible<Object> {
     use serde_json::Value::*;
     Ok(match value {
         Number(n) => Value(
@@ -241,7 +235,7 @@ fn value_to_runtime_object(
                 .ok_or(InvalidJsonFormat("invalid number value"))?,
         ),
         Array(_) => Container(value_to_container(value, name)?),
-        Object(obj) => object_to_runtime_object(obj)?,
+        Object(obj) => json_object_to_ink_object(obj)?,
         // Regular string values
         String(s) if s.starts_with("^") => Value(Value::String(s[1..].into())),
         String(s) if s == "\n" => Value(Value::String("\n".into())),

@@ -27,7 +27,7 @@ pub struct Story {
 }
 
 #[derive(Debug, Clone)]
-pub enum RuntimeObject {
+pub enum Object {
     Value(Value),
     Container(Container),
     Control(ControlCommand),
@@ -45,8 +45,8 @@ pub enum RuntimeObject {
 pub struct Container {
     name: Option<IStr>,
     count_flags: CountFlags,
-    content: Vec<RuntimeObject>,
-    named_only_content: HashMap<IStr, RuntimeObject>,
+    content: Vec<Object>,
+    named_only_content: HashMap<IStr, Object>,
 }
 
 #[derive(Debug, Clone)]
@@ -219,15 +219,6 @@ impl Story {
 
     pub fn to_string(&self) -> Fallible<String> {
         Ok(serde_json::to_string(&json::story_to_value(self)?)?)
-    }
-}
-
-impl RuntimeObject {
-    pub fn name(&self) -> Option<&str> {
-        match self {
-            RuntimeObject::Container(c) => c.name.as_ref().map(|s| s.as_ref()),
-            _ => None,
-        }
     }
 }
 
