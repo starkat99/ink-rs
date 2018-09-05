@@ -1,5 +1,6 @@
 #![feature(uniform_paths)]
 use bitflags::bitflags;
+use encoding_rs_io::DecodeReaderBytes;
 use failure::{Fail, Fallible};
 use std::{
     collections::HashMap,
@@ -201,7 +202,8 @@ impl Story {
     }
 
     pub fn read_json<R: Read>(reader: R) -> Fallible<Self> {
-        let value = serde_json::from_reader(reader)?;
+        let decoder = DecodeReaderBytes::new(reader);
+        let value = serde_json::from_reader(decoder)?;
         json::value_to_story(value)
     }
 
@@ -245,5 +247,17 @@ impl Default for Container {
             content: Vec::default(),
             named_only_content: HashMap::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use std::fs::File;
+
+    #[test]
+    fn read_json() -> Fallible<()> {
+        let _story = Story::read_json(File::open("../examples/stories/TheIntercept.ink.json")?)?;
+        Ok(())
     }
 }

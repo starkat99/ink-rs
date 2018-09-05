@@ -60,10 +60,10 @@ impl Path {
 
     pub fn from_str(path: &str) -> Self {
         let relative = path.starts_with(".");
-        let components: Vec<PathComponent> = path
-            .split(".")
-            .filter_map(PathComponent::from_str)
-            .collect();
+        let mut components: Vec<PathComponent> = Vec::new();
+        for comp in path.split(".").filter_map(PathComponent::from_str) {
+            Self::push_element(&mut components, comp);
+        }
         Path {
             components,
             relative,
@@ -271,7 +271,7 @@ impl PathComponent {
             Some(PathComponent::Index(i))
         } else if s == "^" {
             Some(PathComponent::Parent)
-        } else if !s.is_empty() {
+        } else if !s.is_empty() && !s.contains(".") {
             Some(PathComponent::Name(s.to_owned()))
         } else {
             None
@@ -323,5 +323,48 @@ impl std::fmt::Display for PathComponent {
             Name(s) => write!(fmt, "{}", s),
             Parent => write!(fmt, "^"),
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn parse() {
+        let s = "^.0.test";
+        let path = Path::from_str(s);
+        assert_eq!(path.len(), 3);
+        assert!(!path.is_relative());
+        assert!(path[0].is_parent());
+        assert!(path[1].is_index());
+        assert_eq!(path[1].as_index(), Some(0));
+        assert!(path[2].is_named());
+        assert_eq!(path[2].as_name(), Some("test"));
+        assert_eq!(path.to_string(), s);
+        assert!(path.contains_name("test"));
+
+        let s = ".test.0";
+        let path = Path::from_str(s);
+        assert!(path.is_relative());
+        assert_eq!(path.len(), 2);
+        assert_eq!(path.to_string(), s);
+    }
+
+    #[test]
+    fn normalize() {
+        let mut path = Path::from_str("0.1.^.2.^.^.3");
+        assert_eq!(path.len(), 1);
+        assert_eq!(path[0].as_index(), Some(3));
+        assert_eq!(path.to_string(), "3");
+
+        path.extend(Path::from_str(".4.5"));
+        assert_eq!(path.len(), 3);
+        path.push(PathComponent::from_str("^").unwrap());
+        assert_eq!(path.len(), 2);
+        assert_eq!(path.to_string(), "3.4");
+        path.extend(Path::from_str("^.^.^.^.6"));
+        assert_eq!(path.len(), 3);
+        assert_eq!(path.to_string(), "^.^.6");
     }
 }

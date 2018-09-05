@@ -61,22 +61,31 @@ pub(crate) fn value_to_container(
         }
 
         // The last container element has the named contents, as well as special container fields
-        let last = &array[array.len() - 1]
-            .as_object()
-            .ok_or(InvalidJsonFormat("expected final container object"))?;
-        let mut named_only_content = HashMap::<String, RuntimeObject>::with_capacity(last.len());
-        for (key, value) in last.iter() {
-            if key == "#n" || key == "#f" {
-                continue;
+        let maybe_last = &array[array.len() - 1].as_object();
+        let mut named_only_content = HashMap::<String, RuntimeObject>::with_capacity(
+            maybe_last.map_or(0, |last| last.len()),
+        );
+        if let Some(last) = maybe_last {
+            for (key, value) in last.iter() {
+                if key == "#n" || key == "#f" {
+                    continue;
+                }
+                named_only_content
+                    .insert(key.to_owned(), value_to_runtime_object(value, Some(key))?);
             }
-            named_only_content.insert(key.to_owned(), value_to_runtime_object(value, Some(key))?);
         }
 
         // Special container fields
         // Check for name field if none given from parent
-        let name = name.or(last["#n"].as_str()).map(|s| s.to_owned());
-        let count_flags = last["#f"]
-            .as_i64()
+        let name = name
+            .or_else(|| {
+                maybe_last
+                    .and_then(|last| last.get("#n"))
+                    .and_then(|v| v.as_str())
+            }).map(|s| s.to_owned());
+        let count_flags = maybe_last
+            .and_then(|last| last.get("#f"))
+            .and_then(|v| v.as_i64())
             .map(|n| n as u32)
             .and_then(CountFlags::from_bits)
             .unwrap_or_else(CountFlags::default);
