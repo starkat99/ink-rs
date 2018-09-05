@@ -161,9 +161,9 @@ impl Path {
     }
 }
 
-impl Into<Vec<PathComponent>> for Path {
-    fn into(self) -> Vec<PathComponent> {
-        self.components
+impl From<Path> for Vec<PathComponent> {
+    fn from(path: Path) -> Self {
+        path.components
     }
 }
 
