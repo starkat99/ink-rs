@@ -5,7 +5,9 @@ use failure::{Fail, Fallible};
 use internship::IStr;
 use std::{
     collections::HashMap,
+    fmt::Display,
     io::{Read, Write},
+    str::FromStr,
 };
 
 mod json;
@@ -225,17 +227,26 @@ impl Story {
         json::value_to_story(value)
     }
 
-    pub fn from_str<S: AsRef<str>>(s: S) -> Fallible<Self> {
-        let value = serde_json::from_str(s.as_ref())?;
-        json::value_to_story(value)
-    }
-
     pub fn write_json<W: Write>(&self, writer: W) -> Fallible<()> {
         Ok(serde_json::to_writer(writer, &json::story_to_value(self))?)
     }
+}
 
-    pub fn to_string(&self) -> String {
-        json::story_to_value(self).to_string()
+impl FromStr for Story {
+    type Err = failure::Error;
+    fn from_str(s: &str) -> Fallible<Self> {
+        let value = serde_json::from_str(s.as_ref())?;
+        json::value_to_story(value)
+    }
+}
+
+impl Display for Story {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
+        if fmt.alternate() {
+            write!(fmt, "{:#}", json::story_to_value(self))
+        } else {
+            write!(fmt, "{}", json::story_to_value(self))
+        }
     }
 }
 
@@ -280,7 +291,7 @@ mod test {
 
         let output = story.to_string();
         // Can't really test for equality since hashing probably reordered object keys, for now just make sure it parses again
-        Story::from_str(output)?;
+        Story::from_str(&output)?;
         Ok(())
     }
 }
