@@ -9,12 +9,14 @@ use failure::{bail, ensure, Fallible};
 use internship::IStr;
 use log::{trace, warn};
 use serde_json::json;
+use serde_json::Map;
 use std::collections::HashMap;
 
 const CURRENT_FORMAT_VERSION: u64 = 19;
 const MIN_FORMAT_VERSION: u64 = 18;
 
 pub(crate) fn value_to_story(value: serde_json::Value) -> Fallible<Story> {
+    // Check format version
     let version = value
         .get("inkVersion")
         .and_then(|v| v.as_u64())
@@ -30,6 +32,7 @@ pub(crate) fn value_to_story(value: serde_json::Value) -> Fallible<Story> {
         );
     }
 
+    // Deserialize root container and list definitions
     let root = value_to_container(
         value
             .get("root")
@@ -40,6 +43,7 @@ pub(crate) fn value_to_story(value: serde_json::Value) -> Fallible<Story> {
         .get("listDefs")
         .map(value_to_list_definitions)
         .unwrap_or_else(|| Ok(ListDefinitionsMap::default()))?;
+
     trace!("deserialized ink JSON file");
     Ok(Story {
         root,
@@ -47,9 +51,12 @@ pub(crate) fn value_to_story(value: serde_json::Value) -> Fallible<Story> {
     })
 }
 
-pub(crate) fn story_to_value(_story: &Story) -> Fallible<serde_json::Value> {
-    let value = json!({ "inkVersion": CURRENT_FORMAT_VERSION });
-    Ok(value)
+pub(crate) fn story_to_value(story: &Story) -> serde_json::Value {
+    json!({
+        "inkVersion": CURRENT_FORMAT_VERSION,
+        "root": container_to_value(&story.root, true),
+        "listDefs": list_definitions_to_value(&story.list_definitions),
+     })
 }
 
 fn value_to_container(value: &serde_json::Value, name: Option<IStr>) -> Fallible<Container> {
@@ -100,6 +107,38 @@ fn value_to_container(value: &serde_json::Value, name: Option<IStr>) -> Fallible
             named_only_content,
         })
     }
+}
+
+fn container_to_value(container: &Container, serialize_name: bool) -> serde_json::Value {
+    // Serialize all unnamed content first as array
+    let mut array: Vec<_> = container.content.iter().map(ink_object_to_value).collect();
+
+    // Only serialize final named only contents if needed, otherwise a null
+    if !container.named_only_content.is_empty()
+        || (serialize_name && container.name.is_some())
+        || !container.count_flags.is_empty()
+    {
+        let mut last: Map<_, serde_json::Value> = container
+            .named_only_content
+            .iter()
+            .map(|(key, content)| (key.to_string(), ink_object_to_value(content)))
+            .collect();
+
+        if serialize_name {
+            if let Some(name) = &container.name {
+                last.insert("#n".to_string(), name.to_string().into());
+            }
+        }
+        if !container.count_flags.is_empty() {
+            last.insert("#f".to_string(), container.count_flags.bits().into());
+        }
+
+        array.push(last.into())
+    } else {
+        array.push(json!(null));
+    }
+
+    array.into()
 }
 
 fn json_object_to_ink_object(obj: &serde_json::Map<String, serde_json::Value>) -> Fallible<Object> {
@@ -227,9 +266,11 @@ fn value_to_ink_object(value: &serde_json::Value, name: Option<IStr>) -> Fallibl
         ),
         Array(_) => Container(value_to_container(value, name)?),
         Object(obj) => json_object_to_ink_object(obj)?,
+
         // Regular string values
         String(s) if s.starts_with("^") => Value(Value::String(s[1..].into())),
         String(s) if s == "\n" => Value(Value::String("\n".into())),
+
         // TODO Could match the strings faster with hash tables
         // Control commands
         String(s) if s == "ev" => Control(ControlCommand::EvalStart),
@@ -256,6 +297,7 @@ fn value_to_ink_object(value: &serde_json::Value, name: Option<IStr>) -> Fallibl
         String(s) if s == "listInt" => Control(ControlCommand::ListFromInt),
         String(s) if s == "range" => Control(ControlCommand::ListRange),
         String(s) if s == "lrnd" => Control(ControlCommand::ListRandom),
+
         // Native function calls
         String(s) if s == "+" => NativeCall(NativeFunction::Add),
         String(s) if s == "-" => NativeCall(NativeFunction::Subtract),
@@ -288,6 +330,7 @@ fn value_to_ink_object(value: &serde_json::Value, name: Option<IStr>) -> Fallibl
         String(s) if s == "LIST_COUNT" => NativeCall(NativeFunction::Count),
         String(s) if s == "LIST_VALUE" => NativeCall(NativeFunction::ValueOfList),
         String(s) if s == "LIST_INVERT" => NativeCall(NativeFunction::Invert),
+
         // Misc
         String(s) if s == "<>" => Glue,
         String(s) if s == "void" => Void,
@@ -295,6 +338,153 @@ fn value_to_ink_object(value: &serde_json::Value, name: Option<IStr>) -> Fallibl
         Bool(_) => bail!(InvalidJsonFormat("unexpected boolean value")),
         Null => bail!(InvalidJsonFormat("unexpected null value")),
     })
+}
+
+fn ink_object_to_value(obj: &Object) -> serde_json::Value {
+    match obj {
+        Glue => json!("<>"),
+        Void => json!("void"),
+        Tag(text) => json!({ "#": text }),
+        Variable(VariableReference::Name(name)) => json!({ "VAR?": name }),
+        Variable(VariableReference::Count(path)) => json!({"CNT?": path.to_string()}),
+        Choice(choice) => {
+            json!({"*": choice.path_on_choice.to_string(), "flg": choice.flags.bits()})
+        }
+        Container(container) => container_to_value(container, false),
+        Assignment(var_assign) => {
+            let mut value = json!({
+                if var_assign.global {
+                    "VAR="
+                } else {
+                    "temp="
+                }
+                : var_assign.name
+            });
+
+            let obj = value.as_object_mut().unwrap();
+            if var_assign.new_declaration {
+                obj.insert("re".to_string(), json!(true));
+            }
+
+            value
+        }
+        Divert(divert) => {
+            let mut value = json!({
+                match divert {
+                    Divert { external: true, ..} => "x()",
+                    Divert { pushes_to_stack: true, stack_push_type: PushPopType::Function, .. } => "f()",
+                    Divert { pushes_to_stack: true, stack_push_type: PushPopType::Tunnel, .. } => "->t->",
+                    _ => "->",
+                }
+                :
+
+                match &divert.target {
+                    DivertTarget::Path(path) => path.to_string(),
+                    DivertTarget::Variable(name) => name.to_string(),
+                }
+            });
+
+            let obj = value.as_object_mut().unwrap();
+            if let DivertTarget::Variable(_) = &divert.target {
+                obj.insert("var".to_string(), json!(true));
+            }
+            if divert.conditional {
+                obj.insert("c".to_string(), json!(true));
+            }
+            if divert.external_args > 0 {
+                obj.insert("exArgs".to_string(), json!(divert.external_args));
+            }
+
+            value
+        }
+
+        // Values
+        Value(Value::Int(n)) => json!(n),
+        Value(Value::Float(n)) => json!(n),
+        Value(Value::String(s)) if s == "\n" => json!(s),
+        Value(Value::String(s)) => json!(format!("^{}", s)),
+        Value(Value::DivertTarget(path)) => json!({"^->": path.to_string()}),
+        Value(Value::VariablePointer(name, scope)) => json!({"^var": name, "ci": match scope {
+            VariableScope::Unknown => -1,
+            VariableScope::Global => 0,
+            VariableScope::Callstack(n) => (*n as i64) + 1,
+        }}),
+        Value(Value::List(list)) => {
+            let map: Map<_, _> = list
+                .content
+                .iter()
+                .map(|(key, val)| (key.0.to_string(), val.clone().into()))
+                .collect();
+            let mut value = json!({ "list": map });
+
+            let obj = value.as_object_mut().unwrap();
+            if let Some(names) = &list.origin_names {
+                let names: Vec<serde_json::Value> =
+                    names.iter().map(|s| s.to_string().into()).collect();
+                obj.insert("origins".to_string(), names.into());
+            }
+            value
+        }
+
+        // Control commands
+        Control(ControlCommand::EvalStart) => json!("ev"),
+        Control(ControlCommand::EvalOutput) => json!("out"),
+        Control(ControlCommand::EvalEnd) => json!("/ev"),
+        Control(ControlCommand::Duplicate) => json!("du"),
+        Control(ControlCommand::PopEvaluatedValue) => json!("pop"),
+        Control(ControlCommand::PopFunction) => json!("~ret"),
+        Control(ControlCommand::PopTunnel) => json!("->->"),
+        Control(ControlCommand::BeginString) => json!("str"),
+        Control(ControlCommand::EndString) => json!("/str"),
+        Control(ControlCommand::NoOp) => json!("nop"),
+        Control(ControlCommand::ChoiceCount) => json!("choiceCnt"),
+        Control(ControlCommand::Turns) => json!("turn"),
+        Control(ControlCommand::TurnsSince) => json!("turns"),
+        Control(ControlCommand::ReadCount) => json!("readc"),
+        Control(ControlCommand::Random) => json!("rnd"),
+        Control(ControlCommand::SeedRandom) => json!("srnd"),
+        Control(ControlCommand::VisitIndex) => json!("visit"),
+        Control(ControlCommand::SequenceShuffleIndex) => json!("seq"),
+        Control(ControlCommand::StartThread) => json!("thread"),
+        Control(ControlCommand::Done) => json!("done"),
+        Control(ControlCommand::End) => json!("end"),
+        Control(ControlCommand::ListFromInt) => json!("listInt"),
+        Control(ControlCommand::ListRange) => json!("range"),
+        Control(ControlCommand::ListRandom) => json!("lrnd"),
+
+        // Native function calls
+        NativeCall(NativeFunction::Add) => json!("+"),
+        NativeCall(NativeFunction::Subtract) => json!("-"),
+        NativeCall(NativeFunction::Divide) => json!("/"),
+        NativeCall(NativeFunction::Multiply) => json!("*"),
+        NativeCall(NativeFunction::Modulo) => json!("%"),
+        NativeCall(NativeFunction::Negate) => json!("_"),
+        NativeCall(NativeFunction::Equal) => json!("=="),
+        NativeCall(NativeFunction::Greater) => json!(">"),
+        NativeCall(NativeFunction::Less) => json!("<"),
+        NativeCall(NativeFunction::GreaterOrEqual) => json!(">="),
+        NativeCall(NativeFunction::LessOrEqual) => json!("<="),
+        NativeCall(NativeFunction::NotEqual) => json!("!="),
+        NativeCall(NativeFunction::Not) => json!("!"),
+        NativeCall(NativeFunction::And) => json!("&&"),
+        NativeCall(NativeFunction::Or) => json!("||"),
+        NativeCall(NativeFunction::Min) => json!("MIN"),
+        NativeCall(NativeFunction::Max) => json!("MAX"),
+        NativeCall(NativeFunction::Power) => json!("POW"),
+        NativeCall(NativeFunction::Floor) => json!("FLOOR"),
+        NativeCall(NativeFunction::Ceiling) => json!("CEILING"),
+        NativeCall(NativeFunction::Int) => json!("INT"),
+        NativeCall(NativeFunction::Float) => json!("FLOAT"),
+        NativeCall(NativeFunction::Has) => json!("?"),
+        NativeCall(NativeFunction::HasNot) => json!("!?"),
+        NativeCall(NativeFunction::Intersect) => json!("L^"),
+        NativeCall(NativeFunction::ListMin) => json!("LIST_MIN"),
+        NativeCall(NativeFunction::ListMax) => json!("LIST_MAX"),
+        NativeCall(NativeFunction::All) => json!("LIST_ALL"),
+        NativeCall(NativeFunction::Count) => json!("LIST_COUNT"),
+        NativeCall(NativeFunction::ValueOfList) => json!("LIST_VALUE"),
+        NativeCall(NativeFunction::Invert) => json!("LIST_INVERT"),
+    }
 }
 
 fn value_to_list_definitions(value: &serde_json::Value) -> Fallible<ListDefinitionsMap> {
@@ -305,12 +495,14 @@ fn value_to_list_definitions(value: &serde_json::Value) -> Fallible<ListDefiniti
             .as_object()
             .ok_or(InvalidJsonFormat("expected list definitions object"))?;
 
+        // Deserialize named lists
         let mut defs = HashMap::with_capacity(obj.len());
         for (name, value) in obj {
             let map = value
                 .as_object()
                 .ok_or(InvalidJsonFormat("expected list definition object"))?;
 
+            // Deserialize list item value pairs
             let mut items = HashMap::with_capacity(map.len());
             for (key, val) in map {
                 items.insert(
@@ -320,9 +512,26 @@ fn value_to_list_definitions(value: &serde_json::Value) -> Fallible<ListDefiniti
                         as i32,
                 );
             }
+
             let name: IStr = name[..].into();
             defs.insert(name.clone(), ListDefinition { name, items });
         }
         Ok(ListDefinitionsMap { lists: defs })
     }
+}
+
+fn list_definitions_to_value(list_defs: &ListDefinitionsMap) -> serde_json::Value {
+    list_defs
+        .lists
+        .iter()
+        .map(|(name, def)| {
+            // Serialize list item value pairs
+            let items: Map<_, serde_json::Value> = def
+                .items
+                .iter()
+                .map(|(key, val)| (key.0.to_string(), val.clone().into()))
+                .collect();
+            (name.to_string(), items.into())
+        }).collect::<serde_json::Map<_, serde_json::Value>>()
+        .into()
 }

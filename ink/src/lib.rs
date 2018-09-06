@@ -231,11 +231,11 @@ impl Story {
     }
 
     pub fn write_json<W: Write>(&self, writer: W) -> Fallible<()> {
-        Ok(serde_json::to_writer(writer, &json::story_to_value(self)?)?)
+        Ok(serde_json::to_writer(writer, &json::story_to_value(self))?)
     }
 
-    pub fn to_string(&self) -> Fallible<String> {
-        Ok(serde_json::to_string(&json::story_to_value(self)?)?)
+    pub fn to_string(&self) -> String {
+        json::story_to_value(self).to_string()
     }
 }
 
@@ -266,6 +266,21 @@ mod test {
     #[test]
     fn read_json() -> Fallible<()> {
         let _story = Story::read_json(File::open("../examples/stories/TheIntercept.ink.json")?)?;
+        Ok(())
+    }
+
+    #[test]
+    fn write_json() -> Fallible<()> {
+        let mut decoder =
+            DecodeReaderBytes::new(File::open("../examples/stories/TheIntercept.ink.json")?);
+        let mut s = String::new();
+        decoder.read_to_string(&mut s)?;
+
+        let story = Story::from_str(&s)?;
+
+        let output = story.to_string();
+        // Can't really test for equality since hashing probably reordered object keys, for now just make sure it parses again
+        Story::from_str(output)?;
         Ok(())
     }
 }
