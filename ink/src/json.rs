@@ -1,5 +1,5 @@
 use super::{
-    ChoiceFlags, ChoicePoint, Container, ControlCommand, CountFlags, Divert,
+    ChoiceFlags, ChoicePoint, Container, ControlCommand, CountFlags, Divert, DivertTarget,
     Error::*,
     List, ListItem, NativeFunction,
     Object::{self, *},
@@ -114,7 +114,7 @@ fn json_object_to_ink_object(obj: &serde_json::Map<String, serde_json::Value>) -
             Value(Value::VariablePointer(var.into(), scope))
         }
         // Divert
-        else if let Some(divert_target) = obj
+        else if let Some(target_str) = obj
             .get("->")
             .or_else(|| obj.get("f()"))
             .or_else(|| obj.get("x()"))
@@ -135,26 +135,18 @@ fn json_object_to_ink_object(obj: &serde_json::Map<String, serde_json::Value>) -
                 .and_then(|_| obj.get("exArgs"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as u32;
-            Divert(if obj.contains_key("var") {
-                Divert {
-                    target_path: None,
-                    var_divert_name: Some(divert_target.into()),
-                    pushes_to_stack,
-                    stack_push_type,
-                    external,
-                    external_args,
-                    conditional,
-                }
+            let target = if obj.contains_key("var") {
+                DivertTarget::Variable(target_str.into())
             } else {
-                Divert {
-                    target_path: Some(Path::from_str(divert_target)),
-                    var_divert_name: None,
-                    pushes_to_stack,
-                    stack_push_type,
-                    external,
-                    external_args,
-                    conditional,
-                }
+                DivertTarget::Path(Path::from_str(target_str))
+            };
+            Divert(Divert {
+                target,
+                pushes_to_stack,
+                stack_push_type,
+                external,
+                external_args,
+                conditional,
             })
         }
         // Choice
@@ -174,15 +166,9 @@ fn json_object_to_ink_object(obj: &serde_json::Map<String, serde_json::Value>) -
         }
         // Variable References
         else if let Some(name) = obj.get("VAR?").and_then(|v| v.as_str()) {
-            Variable(VariableReference {
-                name: Some(name.into()),
-                path_for_count: None,
-            })
+            Variable(VariableReference::Name(name.into()))
         } else if let Some(path) = obj.get("CNT?").and_then(|v| v.as_str()).map(Path::from_str) {
-            Variable(VariableReference {
-                name: None,
-                path_for_count: Some(path),
-            })
+            Variable(VariableReference::Count(path))
         }
         // Variable assignment
         else if let Some(name) = obj

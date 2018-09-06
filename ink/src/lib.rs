@@ -147,13 +147,18 @@ pub enum PushPopType {
 
 #[derive(Debug, Clone)]
 pub struct Divert {
-    target_path: Option<Path>,
-    var_divert_name: Option<IStr>,
+    target: DivertTarget,
     pushes_to_stack: bool,
     stack_push_type: PushPopType,
     external: bool,
     external_args: u32,
     conditional: bool,
+}
+
+#[derive(Debug, Clone)]
+enum DivertTarget {
+    Path(Path),
+    Variable(IStr),
 }
 
 #[derive(Debug, Clone)]
@@ -163,9 +168,9 @@ pub struct ChoicePoint {
 }
 
 #[derive(Debug, Clone)]
-pub struct VariableReference {
-    name: Option<IStr>,
-    path_for_count: Option<Path>,
+pub enum VariableReference {
+    Name(IStr),
+    Count(Path),
 }
 
 #[derive(Debug, Clone)]
