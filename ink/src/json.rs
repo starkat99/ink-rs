@@ -1,7 +1,7 @@
 use super::{
     ChoiceFlags, ChoicePoint, Container, ControlCommand, CountFlags, Divert, DivertTarget,
     Error::*,
-    List, ListItem, NativeFunction,
+    List, ListDefinition, ListDefinitionsMap, ListItem, NativeFunction,
     Object::{self, *},
     Path, PushPopType, Story, Value, VariableAssignment, VariableReference, VariableScope,
 };
@@ -36,8 +36,15 @@ pub(crate) fn value_to_story(value: serde_json::Value) -> Fallible<Story> {
             .ok_or(InvalidJsonFormat("missing root node"))?,
         None,
     )?;
+    let list_definitions = value
+        .get("listDefs")
+        .map(value_to_list_definitions)
+        .unwrap_or_else(|| Ok(ListDefinitionsMap::default()))?;
     trace!("deserialized ink JSON file");
-    Ok(Story { root })
+    Ok(Story {
+        root,
+        list_definitions,
+    })
 }
 
 pub(crate) fn story_to_value(_story: &Story) -> Fallible<serde_json::Value> {
@@ -45,10 +52,7 @@ pub(crate) fn story_to_value(_story: &Story) -> Fallible<serde_json::Value> {
     Ok(value)
 }
 
-pub(crate) fn value_to_container(
-    value: &serde_json::Value,
-    name: Option<&str>,
-) -> Fallible<Container> {
+fn value_to_container(value: &serde_json::Value, name: Option<IStr>) -> Fallible<Container> {
     let array = value
         .as_array()
         .ok_or(InvalidJsonFormat("expected container array"))?;
@@ -56,7 +60,7 @@ pub(crate) fn value_to_container(
         Ok(Container::default())
     } else {
         // Deserialize all unnamed contents, skipping the special last array element
-        let mut content = Vec::<Object>::with_capacity(array.len() - 1);
+        let mut content = Vec::with_capacity(array.len() - 1);
         for value in &array[..array.len() - 1] {
             content.push(value_to_ink_object(value, None)?);
         }
@@ -64,24 +68,25 @@ pub(crate) fn value_to_container(
         // The last container element has the named contents, as well as special container fields
         let maybe_last = &array[array.len() - 1].as_object();
         let mut named_only_content =
-            HashMap::<IStr, Object>::with_capacity(maybe_last.map_or(0, |last| last.len()));
+            HashMap::with_capacity(maybe_last.map_or(0, |last| last.len()));
         if let Some(last) = maybe_last {
             for (key, value) in last.iter() {
                 if key == "#n" || key == "#f" {
                     continue;
                 }
-                named_only_content.insert(key[..].into(), value_to_ink_object(value, Some(key))?);
+                let key: IStr = key[..].into();
+                named_only_content.insert(key.clone(), value_to_ink_object(value, Some(key))?);
             }
         }
 
         // Special container fields
         // Check for name field if none given from parent
-        let name = name
-            .or_else(|| {
-                maybe_last
-                    .and_then(|last| last.get("#n"))
-                    .and_then(|v| v.as_str())
-            }).map(|s| s.into());
+        let name = name.or_else(|| {
+            maybe_last
+                .and_then(|last| last.get("#n"))
+                .and_then(|v| v.as_str())
+                .map(|v| v.into())
+        });
         let count_flags = maybe_last
             .and_then(|last| last.get("#f"))
             .and_then(|v| v.as_i64())
@@ -197,10 +202,10 @@ fn json_object_to_ink_object(obj: &serde_json::Map<String, serde_json::Value>) -
                     .map(|v| v.into())
                     .collect()
             });
-            let mut content: HashMap<ListItem, i32> = HashMap::with_capacity(map.len());
-            for (key, val) in map {
-                content.insert(ListItem(key[..].into()), val.as_i64().unwrap_or(0) as i32);
-            }
+            let content = map
+                .iter()
+                .map(|(key, val)| (ListItem(key[..].into()), val.as_i64().unwrap_or(0) as i32))
+                .collect();
             Value(Value::List(List {
                 content,
                 origin_names,
@@ -211,7 +216,7 @@ fn json_object_to_ink_object(obj: &serde_json::Map<String, serde_json::Value>) -
     )
 }
 
-fn value_to_ink_object(value: &serde_json::Value, name: Option<&str>) -> Fallible<Object> {
+fn value_to_ink_object(value: &serde_json::Value, name: Option<IStr>) -> Fallible<Object> {
     use serde_json::Value::*;
     Ok(match value {
         Number(n) => Value(
@@ -290,4 +295,34 @@ fn value_to_ink_object(value: &serde_json::Value, name: Option<&str>) -> Fallibl
         Bool(_) => bail!(InvalidJsonFormat("unexpected boolean value")),
         Null => bail!(InvalidJsonFormat("unexpected null value")),
     })
+}
+
+fn value_to_list_definitions(value: &serde_json::Value) -> Fallible<ListDefinitionsMap> {
+    if value.is_null() {
+        Ok(ListDefinitionsMap::default())
+    } else {
+        let obj = value
+            .as_object()
+            .ok_or(InvalidJsonFormat("expected list definitions object"))?;
+
+        let mut defs = HashMap::with_capacity(obj.len());
+        for (name, value) in obj {
+            let map = value
+                .as_object()
+                .ok_or(InvalidJsonFormat("expected list definition object"))?;
+
+            let mut items = HashMap::with_capacity(map.len());
+            for (key, val) in map {
+                items.insert(
+                    ListItem(key[..].into()),
+                    val.as_i64()
+                        .ok_or(InvalidJsonFormat("expected list item integer value"))?
+                        as i32,
+                );
+            }
+            let name: IStr = name[..].into();
+            defs.insert(name.clone(), ListDefinition { name, items });
+        }
+        Ok(ListDefinitionsMap { lists: defs })
+    }
 }

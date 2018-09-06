@@ -24,6 +24,7 @@ pub enum Error {
 #[derive(Debug, Clone)]
 pub struct Story {
     root: Container,
+    list_definitions: ListDefinitionsMap,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +68,17 @@ pub(crate) struct List {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ListItem(IStr);
+
+#[derive(Debug, Clone)]
+pub(crate) struct ListDefinition {
+    name: IStr,
+    items: HashMap<ListItem, i32>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ListDefinitionsMap {
+    lists: HashMap<IStr, ListDefinition>,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) enum ControlCommand {
@@ -203,6 +215,7 @@ impl Story {
     pub fn new() -> Self {
         Self {
             root: Container::default(),
+            list_definitions: ListDefinitionsMap::default(),
         }
     }
 
@@ -233,6 +246,14 @@ impl Default for Container {
             count_flags: CountFlags::default(),
             content: Vec::default(),
             named_only_content: HashMap::default(),
+        }
+    }
+}
+
+impl Default for ListDefinitionsMap {
+    fn default() -> Self {
+        ListDefinitionsMap {
+            lists: HashMap::default(),
         }
     }
 }
