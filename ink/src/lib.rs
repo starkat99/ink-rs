@@ -27,7 +27,7 @@ pub struct Story {
 }
 
 #[derive(Debug, Clone)]
-pub enum Object {
+pub(crate) enum Object {
     Value(Value),
     Container(Container),
     Control(ControlCommand),
@@ -42,7 +42,7 @@ pub enum Object {
 }
 
 #[derive(Debug, Clone)]
-pub struct Container {
+pub(crate) struct Container {
     name: Option<IStr>,
     count_flags: CountFlags,
     content: Vec<Object>,
@@ -50,7 +50,7 @@ pub struct Container {
 }
 
 #[derive(Debug, Clone)]
-pub enum Value {
+pub(crate) enum Value {
     Int(i32),
     Float(f32),
     String(IStr),
@@ -60,16 +60,16 @@ pub enum Value {
 }
 
 #[derive(Debug, Clone)]
-pub struct List {
+pub(crate) struct List {
     content: HashMap<ListItem, i32>,
     origin_names: Option<Vec<IStr>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ListItem(IStr);
+pub(crate) struct ListItem(IStr);
 
 #[derive(Debug, Clone)]
-pub enum ControlCommand {
+pub(crate) enum ControlCommand {
     EvalStart,
     EvalOutput,
     EvalEnd,
@@ -97,7 +97,7 @@ pub enum ControlCommand {
 }
 
 #[derive(Debug, Clone)]
-pub enum NativeFunction {
+pub(crate) enum NativeFunction {
     Add,
     Subtract,
     Divide,
@@ -132,21 +132,20 @@ pub enum NativeFunction {
 }
 
 #[derive(Debug, Clone)]
-pub enum VariableScope {
+pub(crate) enum VariableScope {
     Unknown,
     Global,
     Callstack(u32),
 }
 
 #[derive(Debug, Clone)]
-pub enum PushPopType {
+pub(crate) enum PushPopType {
     Tunnel,
     Function,
-    FunctionEvaluationFromGame,
 }
 
 #[derive(Debug, Clone)]
-pub struct Divert {
+pub(crate) struct Divert {
     target: DivertTarget,
     pushes_to_stack: bool,
     stack_push_type: PushPopType,
@@ -156,25 +155,25 @@ pub struct Divert {
 }
 
 #[derive(Debug, Clone)]
-enum DivertTarget {
+pub(crate) enum DivertTarget {
     Path(Path),
     Variable(IStr),
 }
 
 #[derive(Debug, Clone)]
-pub struct ChoicePoint {
+pub(crate) struct ChoicePoint {
     path_on_choice: Path,
     flags: ChoiceFlags,
 }
 
 #[derive(Debug, Clone)]
-pub enum VariableReference {
+pub(crate) enum VariableReference {
     Name(IStr),
     Count(Path),
 }
 
 #[derive(Debug, Clone)]
-pub struct VariableAssignment {
+pub(crate) struct VariableAssignment {
     name: IStr,
     new_declaration: bool,
     global: bool,
@@ -182,7 +181,7 @@ pub struct VariableAssignment {
 
 bitflags! {
     #[derive(Default)]
-    struct CountFlags: u32 {
+    pub(crate) struct CountFlags: u32 {
         const Visits = 0x1;
         const Turns = 0x2;
         const CountStartOnly = 0x4;
@@ -191,7 +190,7 @@ bitflags! {
 
 bitflags! {
     #[derive(Default)]
-    struct ChoiceFlags: u32 {
+    pub(crate) struct ChoiceFlags: u32 {
         const Condition = 0x01;
         const StartContent = 0x02;
         const ChoiceOnlyContent = 0x04;
