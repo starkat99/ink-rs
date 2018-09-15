@@ -1,5 +1,8 @@
 use internship::IStr;
-use std::slice::SliceIndex;
+use std::{
+    fmt::{self, Display, Formatter},
+    slice::SliceIndex,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PathComponent {
@@ -243,8 +246,8 @@ impl Extend<PathComponent> for Path {
     }
 }
 
-impl std::fmt::Display for Path {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+impl Display for Path {
+    fn fmt(&self, fmt: &mut Formatter) -> Result<(), fmt::Error> {
         if self.relative {
             write!(fmt, ".")?;
         }
@@ -316,8 +319,8 @@ impl PathComponent {
     }
 }
 
-impl std::fmt::Display for PathComponent {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+impl Display for PathComponent {
+    fn fmt(&self, fmt: &mut Formatter) -> Result<(), fmt::Error> {
         use PathComponent::*;
         match self {
             Index(i) => write!(fmt, "{}", i),

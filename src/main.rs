@@ -3,7 +3,7 @@ use clap::{
     app_from_crate, crate_authors, crate_description, crate_name, crate_version, AppSettings, Arg,
 };
 use failure::{bail, Fallible};
-use ink::Story;
+use ink::{Story, StoryState};
 use std::{
     ffi::{OsStr, OsString},
     fs::File,
@@ -80,7 +80,9 @@ fn main() -> Fallible<()> {
     }
 
     // Play in interactive mode
-    if !args.is_present("compile") {}
+    if !args.is_present("compile") {
+        begin(story);
+    }
 
     Ok(())
 }
@@ -105,4 +107,8 @@ fn validate_not_dir(s: &OsStr) -> Result<(), OsString> {
     } else {
         Ok(())
     }
+}
+
+fn begin(story: Story) {
+    let _state = StoryState::new(&story);
 }
