@@ -1,3 +1,7 @@
+use super::super::{
+    CallStack, CallStackElement, Choice, InternStr, Pointer, SearchResult, StoryState, Thread,
+    VariablesState,
+};
 use super::{
     ChoiceFlags, ChoicePoint, Container, ControlCommand, CountFlags, Divert, DivertTarget,
     Error::*,
@@ -6,21 +10,21 @@ use super::{
     Path, PushPopType, Story, Value, VariableAssignment, VariableReference, VariableScope,
 };
 use failure::{bail, ensure, Fallible};
-use internship::IStr;
 use log::{trace, warn};
 use serde_json::json;
-use serde_json::Map;
-use std::collections::HashMap;
+use std::{borrow::Cow, collections::HashMap};
 
 const CURRENT_FORMAT_VERSION: u64 = 19;
 const MIN_FORMAT_VERSION: u64 = 18;
 
+const CURRENT_SAVE_STATE_VERSION: u64 = 8;
+const MIN_SAVE_STATE_VERSION: u64 = 8;
+
 pub(crate) fn value_to_story(value: serde_json::Value) -> Fallible<Story> {
+    let value = &value;
     // Check format version
-    let version = value
-        .get("inkVersion")
-        .and_then(|v| v.as_u64())
-        .ok_or(InvalidJsonFormat("missing ink format version"))?;
+    let version = get_u64(value, "inkVersion")
+        .ok_or(InvalidJsonFormat("missing ink format version".into()))?;
     ensure!(
         version <= CURRENT_FORMAT_VERSION && version >= MIN_FORMAT_VERSION,
         UnsupportedVersion(version)
@@ -33,12 +37,7 @@ pub(crate) fn value_to_story(value: serde_json::Value) -> Fallible<Story> {
     }
 
     // Deserialize root container and list definitions
-    let root = value_to_container(
-        value
-            .get("root")
-            .ok_or(InvalidJsonFormat("missing root node"))?,
-        None,
-    )?;
+    let root = value_to_container(require(value, "root")?, None)?;
     let list_definitions = value
         .get("listDefs")
         .map(value_to_list_definitions)
@@ -59,10 +58,139 @@ pub(crate) fn story_to_value(story: &Story) -> serde_json::Value {
      })
 }
 
-fn value_to_container(value: &serde_json::Value, name: Option<IStr>) -> Fallible<Container> {
-    let array = value
-        .as_array()
-        .ok_or(InvalidJsonFormat("expected container array"))?;
+pub(crate) fn value_to_story_state<'story>(
+    value: serde_json::Value,
+    story: &'story Story,
+) -> Fallible<StoryState<'story>> {
+    let value = &value;
+    let version = get_u64(value, "inkSaveVersion")
+        .ok_or(InvalidJsonFormat("missing ink save format version".into()))?;
+    ensure!(
+        version <= CURRENT_SAVE_STATE_VERSION && version >= MIN_SAVE_STATE_VERSION,
+        UnsupportedVersion(version)
+    );
+    if version < CURRENT_SAVE_STATE_VERSION {
+        warn!(
+            "ink save format version {} is out of date; current version: {}",
+            version, CURRENT_SAVE_STATE_VERSION
+        );
+    }
+
+    let current_turn_index = require_u32(value, "turnIdx")?;
+    let story_seed = require_u32(value, "storySeed")?;
+    let previous_random = require_u32(value, "previousRandom")?;
+
+    let callstack = value_to_callstack(require(value, "callstackThreads")?, story)?;
+
+    let variables_obj = require_object(value, "variablesState")?;
+    let mut variables = HashMap::with_capacity(variables_obj.len());
+    for (name, value) in variables_obj {
+        variables.insert(name.to_string().into(), value_to_ink_object(value, None)?);
+    }
+
+    let stack_array = require_array(value, "evalStack")?;
+    let mut evaluation_stack = Vec::with_capacity(stack_array.len());
+    for value in stack_array {
+        evaluation_stack.push(value_to_ink_object(value, None)?);
+    }
+
+    let stream_array = require_array(value, "outputStream")?;
+    let mut output_stream = Vec::with_capacity(stream_array.len());
+    for value in stream_array {
+        output_stream.push(value_to_ink_object(value, None)?);
+    }
+
+    let diverted_pointer = get_path(value, "currentDivertTarget")
+        .map(|path| story.get_pointer_at_path(&path))
+        .unwrap_or_default();
+
+    let visits_obj = require_object(value, "visitCounts")?;
+    let mut visit_counts = HashMap::with_capacity(visits_obj.len());
+    for (name, value) in visits_obj {
+        visit_counts.insert(name.to_string().into(), into_u32(value)?);
+    }
+
+    let turns_obj = require_object(value, "turnIndices")?;
+    let mut turn_indices = HashMap::with_capacity(turns_obj.len());
+    for (name, value) in turns_obj {
+        turn_indices.insert(name.to_string().into(), into_u32(value)?);
+    }
+
+    let choice_threads = get_object(value, "choiceThreads");
+
+    let choice_array = require_array(value, "currentChoices")?;
+    let mut current_choices = Vec::with_capacity(choice_array.len());
+    for value in choice_array {
+        current_choices.push(value_to_choice(value, story, &callstack, choice_threads)?);
+    }
+
+    Ok(StoryState {
+        story,
+        current_turn_index,
+        story_seed,
+        previous_random,
+        callstack,
+        variables: VariablesState {
+            global_vars: variables,
+        },
+        evaluation_stack,
+        output_stream,
+        diverted_pointer,
+        visit_counts,
+        turn_indices,
+        current_choices,
+    })
+}
+
+pub(crate) fn story_state_to_value(state: &StoryState) -> serde_json::Value {
+    let mut value = json!({
+        "inkFormatVersion": CURRENT_FORMAT_VERSION,
+        "inkSaveVersion": CURRENT_SAVE_STATE_VERSION,
+        "previousRandom": state.previous_random,
+        "storySeed": state.story_seed,
+        "turnIdx": state.current_turn_index,
+        "evalStack": state.evaluation_stack.iter().map(ink_object_to_value).collect::<Vec<_>>(),
+        "outputStream": state.output_stream.iter().map(ink_object_to_value).collect::<Vec<_>>(),
+        "visitCounts": state.visit_counts.iter().map(|(name, value)| (name.to_string(), value)).collect::<HashMap<_, _>>(),
+        "turnIndices": state.turn_indices.iter().map(|(name, value)| (name.to_string(), value)).collect::<HashMap<_, _>>(),
+        "variablesState": state.variables.global_vars.iter().map(|(name, value)| (name.to_string(), ink_object_to_value(value))).collect::<HashMap<_, _>>(),
+        "currentChoices": state.current_choices.iter().map(choice_to_value).collect::<Vec<_>>(),
+        "callstackThreads": callstack_to_value(&state.callstack),
+        //choiceThreads
+    });
+
+    let obj = value.as_object_mut().unwrap();
+
+    let choice_threads = state
+        .current_choices
+        .iter()
+        .filter_map(|c| {
+            state
+                .callstack
+                .get_thread_with_index(c.thread_at_generation.index)
+                .map(|_| {
+                    (
+                        c.thread_at_generation.index.to_string(),
+                        thread_to_value(&c.thread_at_generation),
+                    )
+                })
+        }).collect::<serde_json::Map<_, _>>();
+    if !choice_threads.is_empty() {
+        obj.insert("choiceThreads".into(), choice_threads.into());
+    }
+
+    if !state.diverted_pointer.is_null() {
+        obj.insert(
+            "currentDivertTarget".into(),
+            state.diverted_pointer.path().to_string().into(),
+        );
+    }
+
+    value
+}
+
+fn value_to_container(value: &serde_json::Value, name: Option<InternStr>) -> Fallible<Container> {
+    let array = into_array(value)?;
     if array.is_empty() {
         Ok(Container::default())
     } else {
@@ -81,7 +209,7 @@ fn value_to_container(value: &serde_json::Value, name: Option<IStr>) -> Fallible
                 if key == "#n" || key == "#f" {
                     continue;
                 }
-                let key: IStr = key[..].into();
+                let key: InternStr = key.to_string().into();
                 named_only_content.insert(key.clone(), value_to_ink_object(value, Some(key))?);
             }
         }
@@ -92,11 +220,11 @@ fn value_to_container(value: &serde_json::Value, name: Option<IStr>) -> Fallible
             maybe_last
                 .and_then(|last| last.get("#n"))
                 .and_then(|v| v.as_str())
-                .map(|v| v.into())
+                .map(|v| v.to_string().into())
         });
         let count_flags = maybe_last
             .and_then(|last| last.get("#f"))
-            .and_then(|v| v.as_i64())
+            .and_then(|v| v.as_u64())
             .map(|n| n as u32)
             .and_then(CountFlags::from_bits)
             .unwrap_or_else(CountFlags::default);
@@ -118,7 +246,7 @@ fn container_to_value(container: &Container, serialize_name: bool) -> serde_json
         || (serialize_name && container.name.is_some())
         || !container.count_flags.is_empty()
     {
-        let mut last: Map<_, serde_json::Value> = container
+        let mut last: serde_json::Map<_, _> = container
             .named_only_content
             .iter()
             .map(|(key, content)| (key.to_string(), ink_object_to_value(content)))
@@ -141,46 +269,43 @@ fn container_to_value(container: &Container, serialize_name: bool) -> serde_json
     array.into()
 }
 
-fn json_object_to_ink_object(obj: &serde_json::Map<String, serde_json::Value>) -> Fallible<Object> {
+fn json_object_to_ink_object(value: &serde_json::Value) -> Fallible<Object> {
     // Not really an easy way to do this
     Ok(
         // DivertTarget
-        if let Some(path) = obj.get("^->").and_then(|v| v.as_str()).map(Path::from_str) {
+        if let Some(path) = get_path(value, "^->") {
             Value(Value::DivertTarget(path))
         }
         // VariablePointer
-        else if let Some(var) = obj.get("^var").and_then(|v| v.as_str()) {
-            let scope = match obj.get("ci").and_then(|v| v.as_i64()) {
+        else if let Some(var) = get_str(value, "^var") {
+            let scope = match get_i64(value, "ci") {
                 Some(0) => VariableScope::Global,
                 Some(context) => VariableScope::Callstack((context - 1) as u32),
                 _ => VariableScope::Unknown,
             };
-            Value(Value::VariablePointer(var.into(), scope))
+            Value(Value::VariablePointer(var.to_string().into(), scope))
         }
         // Divert
-        else if let Some(target_str) = obj
-            .get("->")
-            .or_else(|| obj.get("f()"))
-            .or_else(|| obj.get("x()"))
-            .or_else(|| obj.get("->t->"))
-            .and_then(|v| v.as_str())
+        else if let Some(target_str) = get_str(value, "->")
+            .or_else(|| get_str(value, "f()"))
+            .or_else(|| get_str(value, "x()"))
+            .or_else(|| get_str(value, "->t->"))
         {
-            let tunnel = obj.contains_key("->t->");
-            let pushes_to_stack = obj.contains_key("f()") || tunnel;
+            let tunnel = value.get("->t->").is_some();
+            let pushes_to_stack = value.get("f()").is_some() || tunnel;
             let stack_push_type = if tunnel {
                 PushPopType::Tunnel
             } else {
                 PushPopType::Function
             };
-            let external = obj.contains_key("x()");
-            let conditional = obj.contains_key("c");
+            let external = value.get("x()").is_some();
+            let conditional = value.get("c").is_some();
             let external_args = Some(external)
                 .filter(|&v| v)
-                .and_then(|_| obj.get("exArgs"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32;
-            let target = if obj.contains_key("var") {
-                DivertTarget::Variable(target_str.into())
+                .and_then(|_| get_u32(value, "exArgs"))
+                .unwrap_or(0);
+            let target = if value.get("var").is_some() {
+                DivertTarget::Variable(target_str.to_string().into())
             } else {
                 DivertTarget::Path(Path::from_str(target_str))
             };
@@ -194,13 +319,8 @@ fn json_object_to_ink_object(obj: &serde_json::Map<String, serde_json::Value>) -
             })
         }
         // Choice
-        else if let Some(path_on_choice) =
-            obj.get("*").and_then(|v| v.as_str()).map(Path::from_str)
-        {
-            let flags = obj
-                .get("flg")
-                .and_then(|v| v.as_u64())
-                .map(|i| i as u32)
+        else if let Some(path_on_choice) = get_path(value, "*") {
+            let flags = get_u32(value, "flg")
                 .and_then(ChoiceFlags::from_bits)
                 .unwrap_or(ChoiceFlags::default());
             Choice(ChoicePoint {
@@ -209,67 +329,73 @@ fn json_object_to_ink_object(obj: &serde_json::Map<String, serde_json::Value>) -
             })
         }
         // Variable References
-        else if let Some(name) = obj.get("VAR?").and_then(|v| v.as_str()) {
-            Variable(VariableReference::Name(name.into()))
-        } else if let Some(path) = obj.get("CNT?").and_then(|v| v.as_str()).map(Path::from_str) {
+        else if let Some(name) = get_str(value, "VAR?") {
+            Variable(VariableReference::Name(name.to_string().into()))
+        } else if let Some(path) = get_path(value, "CNT?") {
             Variable(VariableReference::Count(path))
         }
         // Variable assignment
-        else if let Some(name) = obj
-            .get("VAR=")
-            .or_else(|| obj.get("temp="))
-            .and_then(|v| v.as_str())
-        {
-            let global = obj.contains_key("VAR=");
-            let new_declaration = !obj.contains_key("re");
+        else if let Some(name) = get_str(value, "VAR=").or_else(|| get_str(value, "temp=")) {
+            let global = value.get("VAR=").is_some();
+            let new_declaration = value.get("re").is_none();
             Assignment(VariableAssignment {
-                name: name.into(),
+                name: name.to_string().into(),
                 new_declaration,
                 global,
             })
         }
         // Tag
-        else if let Some(text) = obj.get("#").and_then(|v| v.as_str()) {
-            Tag(text.into())
+        else if let Some(text) = get_str(value, "#") {
+            Tag(text.to_string().into())
         }
         // List
-        else if let Some(map) = obj.get("list").and_then(|v| v.as_object()) {
-            let origin_names = obj.get("origins").and_then(|v| v.as_array()).map(|values| {
+        else if let Some(map) = get_object(value, "list") {
+            let origin_names = get_array(value, "origins").map(|values| {
                 values
                     .iter()
                     .filter_map(|v| v.as_str())
-                    .map(|v| v.into())
+                    .map(|v| v.to_string().into())
                     .collect()
             });
             let content = map
                 .iter()
-                .map(|(key, val)| (ListItem(key[..].into()), val.as_i64().unwrap_or(0) as i32))
-                .collect();
+                .map(|(key, val)| {
+                    (
+                        ListItem(key.to_string().into()),
+                        val.as_i64().unwrap_or(0) as i32,
+                    )
+                }).collect();
             Value(Value::List(List {
                 content,
                 origin_names,
             }))
         } else {
-            bail!(InvalidJsonFormat("unrecognized object value"))
+            bail!(InvalidJsonFormat(format!(
+                "unrecognized object value '{}'",
+                value
+            )))
         },
     )
 }
 
-fn value_to_ink_object(value: &serde_json::Value, name: Option<IStr>) -> Fallible<Object> {
+fn value_to_ink_object(value: &serde_json::Value, name: Option<InternStr>) -> Fallible<Object> {
     use serde_json::Value::*;
     Ok(match value {
         Number(n) => Value(
             n.as_i64()
                 .map(|i| Value::Int(i as i32))
                 .or(n.as_f64().map(|f| Value::Float(f as f32)))
-                .ok_or(InvalidJsonFormat("invalid number value"))?,
+                .ok_or(InvalidJsonFormat(format!(
+                    "invalid number value '{}'",
+                    value
+                )))?,
         ),
         Array(_) => Container(value_to_container(value, name)?),
-        Object(obj) => json_object_to_ink_object(obj)?,
+        Object(_) => json_object_to_ink_object(value)?,
 
         // Regular string values
-        String(s) if s.starts_with("^") => Value(Value::String(s[1..].into())),
-        String(s) if s == "\n" => Value(Value::String("\n".into())),
+        String(s) if s.starts_with("^") => Value(Value::String(s[1..].to_string().into())),
+        String(s) if s == "\n" => Value(Value::String("\n".to_string().into())),
 
         // TODO Could match the strings faster with hash tables
         // Control commands
@@ -334,9 +460,12 @@ fn value_to_ink_object(value: &serde_json::Value, name: Option<IStr>) -> Fallibl
         // Misc
         String(s) if s == "<>" => Glue,
         String(s) if s == "void" => Void,
-        String(_) => bail!(InvalidJsonFormat("unrecognized string value")),
-        Bool(_) => bail!(InvalidJsonFormat("unexpected boolean value")),
-        Null => bail!(InvalidJsonFormat("unexpected null value")),
+        String(s) => bail!(InvalidJsonFormat(format!(
+            "unrecognized string value '{}'",
+            s
+        ))),
+        Bool(_) => bail!(InvalidJsonFormat("unexpected boolean value".into())),
+        Null => bail!(InvalidJsonFormat("unexpected null value".into())),
     })
 }
 
@@ -361,8 +490,8 @@ fn ink_object_to_value(obj: &Object) -> serde_json::Value {
                 : var_assign.name
             });
 
-            let obj = value.as_object_mut().unwrap();
             if var_assign.new_declaration {
+                let obj = value.as_object_mut().unwrap();
                 obj.insert("re".to_string(), json!(true));
             }
 
@@ -372,6 +501,7 @@ fn ink_object_to_value(obj: &Object) -> serde_json::Value {
             let mut value = json!({
                 match divert {
                     Divert { external: true, ..} => "x()",
+                    // FunctionEvaluation is only for callstack
                     Divert { pushes_to_stack: true, stack_push_type: PushPopType::Function, .. } => "f()",
                     Divert { pushes_to_stack: true, stack_push_type: PushPopType::Tunnel, .. } => "->t->",
                     _ => "->",
@@ -401,24 +531,26 @@ fn ink_object_to_value(obj: &Object) -> serde_json::Value {
         // Values
         Value(Value::Int(n)) => json!(n),
         Value(Value::Float(n)) => json!(n),
-        Value(Value::String(s)) if s == "\n" => json!(s),
+        Value(Value::String(s)) if **s == "\n" => json!(s),
         Value(Value::String(s)) => json!(format!("^{}", s)),
         Value(Value::DivertTarget(path)) => json!({"^->": path.to_string()}),
-        Value(Value::VariablePointer(name, scope)) => json!({"^var": name, "ci": match scope {
-            VariableScope::Unknown => -1,
-            VariableScope::Global => 0,
-            VariableScope::Callstack(n) => (*n as i64) + 1,
+        Value(Value::VariablePointer(name, scope)) => json!({
+            "^var": name,
+            "ci": match scope {
+                VariableScope::Unknown => -1,
+                VariableScope::Global => 0,
+                VariableScope::Callstack(n) => (*n as i64) + 1,
         }}),
         Value(Value::List(list)) => {
-            let map: Map<_, _> = list
+            let map: serde_json::Map<_, _> = list
                 .content
                 .iter()
                 .map(|(key, val)| (key.0.to_string(), val.clone().into()))
                 .collect();
             let mut value = json!({ "list": map });
 
-            let obj = value.as_object_mut().unwrap();
             if let Some(names) = &list.origin_names {
+                let obj = value.as_object_mut().unwrap();
                 let names: Vec<serde_json::Value> =
                     names.iter().map(|s| s.to_string().into()).collect();
                 obj.insert("origins".to_string(), names.into());
@@ -491,29 +623,20 @@ fn value_to_list_definitions(value: &serde_json::Value) -> Fallible<ListDefiniti
     if value.is_null() {
         Ok(ListDefinitionsMap::default())
     } else {
-        let obj = value
-            .as_object()
-            .ok_or(InvalidJsonFormat("expected list definitions object"))?;
+        let obj = into_object(value)?;
 
         // Deserialize named lists
         let mut defs = HashMap::with_capacity(obj.len());
         for (name, value) in obj {
-            let map = value
-                .as_object()
-                .ok_or(InvalidJsonFormat("expected list definition object"))?;
+            let map = into_object(value)?;
 
             // Deserialize list item value pairs
             let mut items = HashMap::with_capacity(map.len());
             for (key, val) in map {
-                items.insert(
-                    ListItem(key[..].into()),
-                    val.as_i64()
-                        .ok_or(InvalidJsonFormat("expected list item integer value"))?
-                        as i32,
-                );
+                items.insert(ListItem(key.to_string().into()), into_i32(val)?);
             }
 
-            let name: IStr = name[..].into();
+            let name: InternStr = name.to_string().into();
             defs.insert(name.clone(), ListDefinition { name, items });
         }
         Ok(ListDefinitionsMap { lists: defs })
@@ -526,12 +649,306 @@ fn list_definitions_to_value(list_defs: &ListDefinitionsMap) -> serde_json::Valu
         .iter()
         .map(|(name, def)| {
             // Serialize list item value pairs
-            let items: Map<_, serde_json::Value> = def
+            let items: serde_json::Map<_, _> = def
                 .items
                 .iter()
                 .map(|(key, val)| (key.0.to_string(), val.clone().into()))
                 .collect();
             (name.to_string(), items.into())
-        }).collect::<serde_json::Map<_, serde_json::Value>>()
+        }).collect::<serde_json::Map<_, _>>()
         .into()
+}
+
+fn value_to_callstack<'story>(
+    value: &serde_json::Value,
+    story: &'story Story,
+) -> Fallible<CallStack<'story>> {
+    let thread_counter = require_u32(value, "threadCounter")?;
+
+    let thread_array = require_array(value, "threads")?;
+    let mut threads = Vec::with_capacity(thread_array.len());
+    for value in thread_array {
+        threads.push(value_to_thread(value, story)?);
+    }
+
+    Ok(CallStack {
+        thread_counter,
+        threads,
+    })
+}
+
+fn callstack_to_value(callstack: &CallStack) -> serde_json::Value {
+    json!({
+        "threadCounter": callstack.thread_counter,
+        "threads": callstack.threads.iter().map(thread_to_value).collect::<Vec<_>>(),
+    })
+}
+
+fn value_to_thread<'story>(
+    value: &serde_json::Value,
+    story: &'story Story,
+) -> Fallible<Thread<'story>> {
+    let index = require_u32(value, "threadIndex")?;
+
+    let previous_pointer = get_path(value, "previousContentObject")
+        .map(|path| story.get_pointer_at_path(&path))
+        .unwrap_or_default();
+
+    let callstack_array = require_array(value, "callstack")?;
+    let mut callstack = Vec::with_capacity(callstack_array.len());
+    for value in callstack_array {
+        callstack.push(value_to_callstack_element(value, story)?);
+    }
+
+    Ok(Thread {
+        index,
+        previous_pointer,
+        callstack,
+    })
+}
+
+fn thread_to_value(thread: &Thread) -> serde_json::Value {
+    let mut value = json!({
+        "threadIndex": thread.index,
+        "callstack": thread.callstack.iter().map(callstack_element_to_value).collect::<Vec<_>>(),
+    });
+
+    if !thread.previous_pointer.is_null() {
+        value.as_object_mut().unwrap().insert(
+            "previousContentObject".into(),
+            thread.previous_pointer.path().to_string().into(),
+        );
+    }
+
+    value
+}
+
+fn value_to_callstack_element<'story>(
+    value: &serde_json::Value,
+    story: &'story Story,
+) -> Fallible<CallStackElement<'story>> {
+    let stack_type = get_u64(value, "type")
+        .and_then(|v| match v {
+            0 => Some(PushPopType::Tunnel),
+            1 => Some(PushPopType::Function),
+            2 => Some(PushPopType::FunctionEvaluation),
+            _ => None,
+        }).ok_or(InvalidJsonFormat(
+            "missing callstack element type value".into(),
+        ))?;
+
+    let pointer = if let Some(path) = get_path(value, "cPath") {
+        let pointer_index = require_u32(value, "idx")?;
+
+        match story.get_container_at_path(&path) {
+            SearchResult::Exact(c) => Pointer::new(c, Some(pointer_index)),
+            SearchResult::Approximate(c) => {
+                warn!(
+                    "exact story path '{}' not found, approximated to '{}' to recover",
+                    path,
+                    c.path()
+                );
+                Pointer::new(c, Some(pointer_index))
+            }
+            SearchResult::None => bail!(PathNotFound(path)),
+        }
+    } else {
+        Pointer::default()
+    };
+
+    let in_expression_evaluation = require_bool(value, "exp")?;
+
+    let temp_vars_obj = require_object(value, "temp")?;
+    let mut temp_vars = HashMap::with_capacity(temp_vars_obj.len());
+    for (name, value) in temp_vars_obj {
+        temp_vars.insert(name.to_string().into(), value_to_ink_object(value, None)?);
+    }
+
+    Ok(CallStackElement {
+        stack_type,
+        pointer,
+        in_expression_evaluation,
+        temp_vars,
+    })
+}
+
+fn callstack_element_to_value(element: &CallStackElement) -> serde_json::Value {
+    let mut value = json!({
+        "exp": element.in_expression_evaluation,
+        "type": match element.stack_type {
+            PushPopType::Tunnel => 0,
+            PushPopType::Function => 1,
+            PushPopType::FunctionEvaluation => 2,
+        },
+        "temp": element.temp_vars.iter().map(|(name, value)| (name.to_string(), ink_object_to_value(value))).collect::<HashMap<_, _>>(),
+    });
+
+    if !element.pointer.is_null() {
+        let obj = value.as_object_mut().unwrap();
+        obj.insert(
+            "cPath".into(),
+            element.pointer.container.unwrap().path().to_string().into(),
+        );
+        obj.insert("idx".into(), element.pointer.index.unwrap().into());
+    }
+
+    value
+}
+
+fn value_to_choice<'story>(
+    value: &serde_json::Value,
+    story: &'story Story,
+    callstack: &CallStack<'story>,
+    choice_threads: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Fallible<Choice<'story>> {
+    let text = require_str(value, "text")?;
+    let index = require_u32(value, "index")?;
+    let source_path = require_path(value, "originalChoicePath")?;
+    let target_path = require_path(value, "targetPath")?;
+    let original_thread_index = require_u32(value, "originalThreadIndex")?;
+
+    let thread_at_generation =
+        if let Some(thread) = callstack.get_thread_with_index(original_thread_index) {
+            Cow::Borrowed(thread)
+        } else {
+            Cow::Owned(value_to_thread(
+                choice_threads
+                    .and_then(|threads| threads.get(&original_thread_index.to_string()))
+                    .ok_or(InvalidJsonFormat("expected choice thread object".into()))?,
+                story,
+            )?)
+        };
+
+    Ok(Choice {
+        text: text.to_string().into(),
+        index,
+        source_path,
+        target_path,
+        original_thread_index,
+        thread_at_generation,
+    })
+}
+
+fn choice_to_value(choice: &Choice) -> serde_json::Value {
+    json!({
+        "text": choice.text,
+        "index": choice.index,
+        "originalChoicePath": choice.source_path.to_string(),
+        "originalThreadIndex": choice.original_thread_index,
+        "targetPath": choice.target_path.to_string(),
+    })
+}
+
+// Helpers
+fn require<'a>(value: &'a serde_json::Value, key: &str) -> Fallible<&'a serde_json::Value> {
+    value
+        .get(key)
+        .ok_or(InvalidJsonFormat(format!("missing '{}'", key)).into())
+}
+
+fn get_i64(value: &serde_json::Value, key: &str) -> Option<i64> {
+    value.get(key).and_then(|v| v.as_i64())
+}
+
+fn into_i64(value: &serde_json::Value) -> Fallible<i64> {
+    value
+        .as_i64()
+        .ok_or(InvalidJsonFormat(format!("expected integer value, got '{}'", value)).into())
+}
+
+fn into_i32(value: &serde_json::Value) -> Fallible<i32> {
+    Ok(into_i64(value)? as i32)
+}
+
+fn get_u64(value: &serde_json::Value, key: &str) -> Option<u64> {
+    value.get(key).and_then(|v| v.as_u64())
+}
+
+fn require_u64(value: &serde_json::Value, key: &str) -> Fallible<u64> {
+    get_u64(value, key)
+        .ok_or(InvalidJsonFormat(format!("expected unsigned integer value for '{}'", key)).into())
+}
+
+fn into_u64(value: &serde_json::Value) -> Fallible<u64> {
+    value.as_u64().ok_or(
+        InvalidJsonFormat(format!("expected unsigned integer value, got '{}'", value)).into(),
+    )
+}
+
+fn get_u32(value: &serde_json::Value, key: &str) -> Option<u32> {
+    get_u64(value, key).map(|v| v as u32)
+}
+
+fn require_u32(value: &serde_json::Value, key: &str) -> Fallible<u32> {
+    Ok(require_u64(value, key)? as u32)
+}
+
+fn into_u32(value: &serde_json::Value) -> Fallible<u32> {
+    Ok(into_u64(value)? as u32)
+}
+
+fn get_str<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    value.get(key).and_then(|v| v.as_str())
+}
+
+fn require_str<'a>(value: &'a serde_json::Value, key: &str) -> Fallible<&'a str> {
+    get_str(value, key)
+        .ok_or(InvalidJsonFormat(format!("expected string value for '{}'", key)).into())
+}
+
+fn get_path(value: &serde_json::Value, key: &str) -> Option<Path> {
+    get_str(value, key).map(Path::from_str)
+}
+
+fn require_path(value: &serde_json::Value, key: &str) -> Fallible<Path> {
+    get_path(value, key)
+        .ok_or(InvalidJsonFormat(format!("expected path string value for '{}'", key)).into())
+}
+
+fn get_object<'a>(
+    value: &'a serde_json::Value,
+    key: &str,
+) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
+    value.get(key).and_then(|v| v.as_object())
+}
+
+fn require_object<'a>(
+    value: &'a serde_json::Value,
+    key: &str,
+) -> Fallible<&'a serde_json::Map<String, serde_json::Value>> {
+    get_object(value, key)
+        .ok_or(InvalidJsonFormat(format!("expected object value for '{}'", key)).into())
+}
+
+fn into_object(value: &serde_json::Value) -> Fallible<&serde_json::Map<String, serde_json::Value>> {
+    value
+        .as_object()
+        .ok_or(InvalidJsonFormat(format!("expected object value, got '{}'", value)).into())
+}
+
+fn get_array<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a Vec<serde_json::Value>> {
+    value.get(key).and_then(|v| v.as_array())
+}
+
+fn require_array<'a>(
+    value: &'a serde_json::Value,
+    key: &str,
+) -> Fallible<&'a Vec<serde_json::Value>> {
+    get_array(value, key)
+        .ok_or(InvalidJsonFormat(format!("expected array value for '{}'", key)).into())
+}
+
+fn into_array(value: &serde_json::Value) -> Fallible<&Vec<serde_json::Value>> {
+    value
+        .as_array()
+        .ok_or(InvalidJsonFormat(format!("expected array value, got '{}'", value)).into())
+}
+
+fn get_bool(value: &serde_json::Value, key: &str) -> Option<bool> {
+    value.get(key).and_then(|v| v.as_bool())
+}
+
+fn require_bool(value: &serde_json::Value, key: &str) -> Fallible<bool> {
+    get_bool(value, key)
+        .ok_or(InvalidJsonFormat(format!("expected boolean value for '{}'", key)).into())
 }

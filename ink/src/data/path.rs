@@ -1,13 +1,14 @@
-use internship::IStr;
 use std::{
     fmt::{self, Display, Formatter},
     slice::SliceIndex,
 };
 
+type InternStr = internment::ArcIntern<String>; // We need Path to be Send, unlike the rest of data
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PathComponent {
     Index(u32),
-    Name(IStr),
+    Name(InternStr),
     Parent,
 }
 
@@ -84,7 +85,7 @@ impl Path {
 
     pub fn contains_name(&self, name: &str) -> bool {
         self.components.iter().any(|c| match c {
-            PathComponent::Name(s) => s == name,
+            PathComponent::Name(s) => **s == name,
             _ => false,
         })
     }
@@ -276,7 +277,7 @@ impl PathComponent {
         } else if s == "^" {
             Some(PathComponent::Parent)
         } else if !s.is_empty() && !s.contains(".") {
-            Some(PathComponent::Name(s.into()))
+            Some(PathComponent::Name(s.to_string().into()))
         } else {
             None
         }

@@ -1,13 +1,13 @@
+use super::{InternStr, Pointer, SearchResult};
 use bitflags::bitflags;
 use encoding_rs_io::DecodeReaderBytes;
 use failure::{Fail, Fallible};
-use internship::IStr;
 use std::{
     collections::HashMap,
     io::{Read, Write},
 };
 
-mod json;
+pub(crate) mod json;
 mod path;
 
 pub use path::{Path, PathComponent};
@@ -15,9 +15,11 @@ pub use path::{Path, PathComponent};
 #[derive(Debug, Fail)]
 pub enum Error {
     #[fail(display = "invalid format: {}", _0)]
-    InvalidJsonFormat(&'static str),
+    InvalidJsonFormat(String),
     #[fail(display = "unsupported ink format version: {}", _0)]
     UnsupportedVersion(u64),
+    #[fail(display = "story path not found: '{}'", _0)]
+    PathNotFound(Path),
 }
 
 #[derive(Debug, Clone)]
@@ -36,47 +38,47 @@ pub(crate) enum Object {
     Choice(ChoicePoint),
     Variable(VariableReference),
     Assignment(VariableAssignment),
-    Tag(IStr),
+    Tag(InternStr),
     Glue,
     Void,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct Container {
-    name: Option<IStr>,
+    name: Option<InternStr>,
     count_flags: CountFlags,
     content: Vec<Object>,
-    named_only_content: HashMap<IStr, Object>,
+    named_only_content: HashMap<InternStr, Object>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) enum Value {
     Int(i32),
     Float(f32),
-    String(IStr),
+    String(InternStr),
     DivertTarget(Path),
-    VariablePointer(IStr, VariableScope),
+    VariablePointer(InternStr, VariableScope),
     List(List),
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct List {
     content: HashMap<ListItem, i32>,
-    origin_names: Option<Vec<IStr>>,
+    origin_names: Option<Vec<InternStr>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct ListItem(IStr);
+pub(crate) struct ListItem(InternStr);
 
 #[derive(Debug, Clone)]
 pub(crate) struct ListDefinition {
-    name: IStr,
+    name: InternStr,
     items: HashMap<ListItem, i32>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct ListDefinitionsMap {
-    lists: HashMap<IStr, ListDefinition>,
+    lists: HashMap<InternStr, ListDefinition>,
 }
 
 #[derive(Debug, Clone)]
@@ -153,6 +155,7 @@ pub(crate) enum VariableScope {
 pub(crate) enum PushPopType {
     Tunnel,
     Function,
+    FunctionEvaluation,
 }
 
 #[derive(Debug, Clone)]
@@ -168,7 +171,7 @@ pub(crate) struct Divert {
 #[derive(Debug, Clone)]
 pub(crate) enum DivertTarget {
     Path(Path),
-    Variable(IStr),
+    Variable(InternStr),
 }
 
 #[derive(Debug, Clone)]
@@ -179,13 +182,13 @@ pub(crate) struct ChoicePoint {
 
 #[derive(Debug, Clone)]
 pub(crate) enum VariableReference {
-    Name(IStr),
+    Name(InternStr),
     Count(Path),
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct VariableAssignment {
-    name: IStr,
+    name: InternStr,
     new_declaration: bool,
     global: bool,
 }
@@ -233,6 +236,27 @@ impl Story {
     pub fn to_json_string_pretty(&self) -> String {
         serde_json::to_string_pretty(&json::story_to_value(self))
             .expect("unexpected failure writing pretty json string")
+    }
+
+    pub(crate) fn get_pointer_at_path<'story>(&'story self, path: &Path) -> Pointer<'story> {
+        if path.is_empty() {
+            return Pointer::default();
+        }
+
+        unimplemented!()
+    }
+
+    pub(crate) fn get_container_at_path<'story>(
+        &'story self,
+        _path: &Path,
+    ) -> SearchResult<'story, Container> {
+        unimplemented!()
+    }
+}
+
+impl Container {
+    pub fn path(&self) -> Path {
+        unimplemented!()
     }
 }
 
