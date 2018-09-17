@@ -11,10 +11,11 @@ use std::{
 
 mod data;
 
+use data::PathRef;
 pub use data::{Error, Path, PathComponent, Story};
 
-// TODO Use a memory arena with same lifetime as Story instead of thread lifetime
-pub(crate) type InternStr = internment::LocalIntern<String>;
+pub(crate) type InternStr = string_interner::Sym;
+pub(crate) type StringArena = string_interner::StringInterner<InternStr>;
 
 #[derive(Debug, Clone)]
 pub struct StoryState<'story> {
@@ -62,8 +63,8 @@ pub(crate) struct Thread<'story> {
 #[derive(Debug, Clone)]
 pub(crate) struct Choice<'story> {
     text: InternStr,
-    target_path: Path,
-    source_path: Path,
+    target_path: PathRef,
+    source_path: PathRef,
     index: u32,
     original_thread_index: u32,
     thread_at_generation: Cow<'story, Thread<'story>>,
@@ -146,7 +147,7 @@ impl<'story> Pointer<'story> {
         self.container.is_none()
     }
 
-    pub(crate) fn path(&self) -> Path {
+    pub(crate) fn path(&self) -> PathRef {
         unimplemented!()
     }
 }

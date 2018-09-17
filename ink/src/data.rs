@@ -1,8 +1,9 @@
-use super::{InternStr, Pointer, SearchResult};
+use super::{InternStr, Pointer, SearchResult, StringArena};
 use bitflags::bitflags;
 use encoding_rs_io::DecodeReaderBytes;
 use failure::{Fail, Fallible};
 use std::{
+    cell::{Ref, RefCell},
     collections::HashMap,
     io::{Read, Write},
 };
@@ -10,6 +11,7 @@ use std::{
 pub(crate) mod json;
 mod path;
 
+pub(crate) use path::PathRef;
 pub use path::{Path, PathComponent};
 
 #[derive(Debug, Fail)]
@@ -19,13 +21,15 @@ pub enum Error {
     #[fail(display = "unsupported ink format version: {}", _0)]
     UnsupportedVersion(u64),
     #[fail(display = "story path not found: '{}'", _0)]
-    PathNotFound(Path),
+    PathNotFound(String),
 }
 
 #[derive(Debug, Clone)]
 pub struct Story {
     root: Container,
     list_definitions: ListDefinitionsMap,
+    // Would rather not have this interior mutability, but story state doesn't maintain a separate arena
+    string_arena: RefCell<StringArena>,
 }
 
 #[derive(Debug, Clone)]
@@ -56,7 +60,7 @@ pub(crate) enum Value {
     Int(i32),
     Float(f32),
     String(InternStr),
-    DivertTarget(Path),
+    DivertTarget(PathRef),
     VariablePointer(InternStr, VariableScope),
     List(List),
 }
@@ -170,20 +174,20 @@ pub(crate) struct Divert {
 
 #[derive(Debug, Clone)]
 pub(crate) enum DivertTarget {
-    Path(Path),
+    Path(PathRef),
     Variable(InternStr),
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct ChoicePoint {
-    path_on_choice: Path,
+    path_on_choice: PathRef,
     flags: ChoiceFlags,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) enum VariableReference {
     Name(InternStr),
-    Count(Path),
+    Count(PathRef),
 }
 
 #[derive(Debug, Clone)]
@@ -238,7 +242,7 @@ impl Story {
             .expect("unexpected failure writing pretty json string")
     }
 
-    pub(crate) fn get_pointer_at_path<'story>(&'story self, path: &Path) -> Pointer<'story> {
+    pub(crate) fn get_pointer_at_path<'story>(&'story self, path: &PathRef) -> Pointer<'story> {
         if path.is_empty() {
             return Pointer::default();
         }
@@ -248,14 +252,31 @@ impl Story {
 
     pub(crate) fn get_container_at_path<'story>(
         &'story self,
-        _path: &Path,
+        _path: &PathRef,
     ) -> SearchResult<'story, Container> {
         unimplemented!()
+    }
+
+    pub(crate) fn resolve_str(&self, s: InternStr) -> Ref<str> {
+        Ref::map(self.string_arena.borrow(), |b| {
+            b.resolve(s).expect(
+                "interned string did not resolve, somewhere a string was not interned properly",
+            )
+        })
+    }
+
+    pub(crate) fn intern_str<T: Into<String> + AsRef<str>>(&self, s: T) -> InternStr {
+        self.string_arena.borrow_mut().get_or_intern(s)
+    }
+
+    pub(crate) fn path_to_string(&self, path: &PathRef) -> String {
+        path.to_string(&self.string_arena.borrow())
+            .expect("interned path did not resolve, somewhere a string was not interned properly")
     }
 }
 
 impl Container {
-    pub fn path(&self) -> Path {
+    pub(crate) fn path_ref(&self) -> PathRef {
         unimplemented!()
     }
 }

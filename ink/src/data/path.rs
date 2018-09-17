@@ -1,14 +1,14 @@
 use std::{
     fmt::{self, Display, Formatter},
     slice::SliceIndex,
+    borrow::Cow
 };
-
-type InternStr = internment::ArcIntern<String>; // We need Path to be Send, unlike the rest of data
+use super::super::{InternStr, StringArena};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PathComponent {
     Index(u32),
-    Name(InternStr),
+    Name(String),
     Parent,
 }
 
@@ -18,51 +18,266 @@ pub struct Path {
     relative: bool,
 }
 
-impl Path {
-    fn push_element(components: &mut Vec<PathComponent>, comp: PathComponent) {
-        if comp.is_parent() {
-            // Normalize any parents
-            match components.last() {
-                Some(PathComponent::Index(_)) | Some(PathComponent::Name(_)) => {
-                    components.pop();
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum PathRefComponent {
+    Index(u32),
+    Name(InternStr),
+    Parent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct PathRef {
+    components: Vec<PathRefComponent>,
+    relative: bool,
+}
+
+macro_rules! create_impls {
+    ( $Path:ident, $PathComponent:ident ) => {
+        impl $Path {
+            fn push_element(components: &mut Vec<$PathComponent>, comp: $PathComponent) {
+                if comp.is_parent() {
+                    // Normalize any parents
+                    match components.last() {
+                        Some($PathComponent::Index(_)) | Some($PathComponent::Name(_)) => {
+                            components.pop();
+                        }
+                        _ => components.push(comp),
+                    }
+                } else {
+                    components.push(comp)
                 }
-                _ => components.push(comp),
             }
-        } else {
-            components.push(comp)
+
+            pub fn relative_self() -> Self {
+                $Path {
+                    components: Vec::default(),
+                    relative: true,
+                }
+            }
+
+            pub fn new(components: impl IntoIterator<Item = $PathComponent>, relative: bool) -> Self {
+                let mut comps = Vec::new();
+                for comp in components {
+                    Self::push_element(&mut comps, comp);
+                }
+                $Path {
+                    components: comps,
+                    relative,
+                }
+            }
+
+            pub fn new_head(head: $PathComponent, tail: impl IntoIterator<Item = $PathComponent>) -> Self {
+                let mut components = Vec::new();
+                Self::push_element(&mut components, head);
+                for comp in tail {
+                    Self::push_element(&mut components, comp);
+                }
+                $Path {
+                    components,
+                    relative: false,
+                }
+            }
+
+            pub fn is_relative(&self) -> bool {
+                self.relative
+            }
+
+            pub fn contains_named_component(&self) -> bool {
+                self.components.iter().any(|c| c.is_named())
+            }
+
+            pub fn len(&self) -> usize {
+                self.components.len()
+            }
+
+            pub fn is_empty(&self) -> bool {
+                self.components.is_empty()
+            }
+
+            pub fn first(&self) -> Option<&$PathComponent> {
+                self.components.first()
+            }
+
+            pub fn first_mut(&mut self) -> Option<&mut $PathComponent> {
+                self.components.first_mut()
+            }
+
+            pub fn last(&self) -> Option<&$PathComponent> {
+                self.components.last()
+            }
+
+            pub fn last_mut(&mut self) -> Option<&mut $PathComponent> {
+                self.components.last_mut()
+            }
+
+            pub fn split_head(&self) -> (Option<&$PathComponent>, $Path) {
+                if let Some((first, tail)) = self.components.split_first() {
+                    (
+                        Some(first),
+                        $Path {
+                            components: tail.to_owned(),
+                            relative: true,
+                        },
+                    )
+                } else {
+                    (None, $Path::relative_self())
+                }
+            }
+
+            pub fn as_slice(&self) -> &[$PathComponent] {
+                self.components.as_slice()
+            }
+
+            pub fn as_mut_slice(&mut self) -> &mut [$PathComponent] {
+                self.components.as_mut_slice()
+            }
+
+            pub fn get<I>(&self, index: I) -> Option<&<I as SliceIndex<[$PathComponent]>>::Output>
+            where
+                I: SliceIndex<[$PathComponent]>,
+            {
+                self.components.get(index)
+            }
+
+            pub fn get_mut<I>(
+                &mut self,
+                index: I,
+            ) -> Option<&mut <I as SliceIndex<[$PathComponent]>>::Output>
+            where
+                I: SliceIndex<[$PathComponent]>,
+            {
+                self.components.get_mut(index)
+            }
+
+            pub fn iter(&self) -> impl Iterator<Item = &$PathComponent> {
+                self.components.iter()
+            }
+
+            pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut $PathComponent> {
+                self.components.iter_mut()
+            }
+
+            pub fn push(&mut self, component: $PathComponent) {
+                Self::push_element(&mut self.components, component);
+            }
+        }
+
+        impl From<$Path> for Vec<$PathComponent> {
+            fn from(path: $Path) -> Self {
+                path.components
+            }
+        }
+
+        impl Default for $Path {
+            fn default() -> Self {
+                $Path {
+                    components: Vec::default(),
+                    relative: false,
+                }
+            }
+        }
+
+        impl<I> std::ops::Index<I> for $Path
+        where
+            I: SliceIndex<[$PathComponent]>,
+        {
+            type Output = <I as SliceIndex<[$PathComponent]>>::Output;
+
+            fn index(&self, index: I) -> &<$Path as std::ops::Index<I>>::Output {
+                &self.components[index]
+            }
+        }
+
+        impl<I> std::ops::IndexMut<I> for $Path
+        where
+            I: SliceIndex<[$PathComponent]>,
+        {
+            fn index_mut(&mut self, index: I) -> &mut <$Path as std::ops::Index<I>>::Output {
+                &mut self.components[index]
+            }
+        }
+
+        impl IntoIterator for $Path {
+            type Item = $PathComponent;
+            type IntoIter = <Vec<$PathComponent> as IntoIterator>::IntoIter;
+
+            fn into_iter(self) -> Self::IntoIter {
+                self.components.into_iter()
+            }
+        }
+
+        impl<'a> IntoIterator for &'a $Path {
+            type Item = &'a $PathComponent;
+            type IntoIter = <&'a Vec<$PathComponent> as IntoIterator>::IntoIter;
+
+            fn into_iter(self) -> Self::IntoIter {
+                (&self.components).into_iter()
+            }
+        }
+
+        impl<'a> IntoIterator for &'a mut $Path {
+            type Item = &'a mut $PathComponent;
+            type IntoIter = <&'a mut Vec<$PathComponent> as IntoIterator>::IntoIter;
+
+            fn into_iter(self) -> Self::IntoIter {
+                (&mut self.components).into_iter()
+            }
+        }
+
+        impl Extend<$PathComponent> for $Path {
+            fn extend<I>(&mut self, iter: I)
+            where
+                I: IntoIterator<Item = $PathComponent>,
+            {
+                for component in iter {
+                    self.push(component)
+                }
+            }
+        }
+
+        impl $PathComponent {
+            pub fn from_u32(i: u32) -> $PathComponent {
+                $PathComponent::Index(i)
+            }
+
+            pub fn parent() -> $PathComponent {
+                $PathComponent::Parent
+            }
+
+            pub fn is_named(&self) -> bool {
+                if let $PathComponent::Name(_) = self {
+                    true
+                } else {
+                    false
+                }
+            }
+
+            pub fn is_index(&self) -> bool {
+                if let $PathComponent::Index(_) = self {
+                    true
+                } else {
+                    false
+                }
+            }
+
+            pub fn as_index(&self) -> Option<u32> {
+                if let $PathComponent::Index(i) = self {
+                    Some(*i)
+                } else {
+                    None
+                }
+            }
+
+            pub fn is_parent(&self) -> bool {
+                &$PathComponent::Parent == self
+            }
         }
     }
+}
 
-    pub fn relative_self() -> Self {
-        Path {
-            components: Vec::default(),
-            relative: true,
-        }
-    }
+create_impls!(Path, PathComponent);
 
-    pub fn new(components: impl IntoIterator<Item = PathComponent>, relative: bool) -> Self {
-        let mut comps = Vec::new();
-        for comp in components {
-            Self::push_element(&mut comps, comp);
-        }
-        Path {
-            components: comps,
-            relative,
-        }
-    }
-
-    pub fn new_head(head: PathComponent, tail: impl IntoIterator<Item = PathComponent>) -> Self {
-        let mut components = Vec::new();
-        Self::push_element(&mut components, head);
-        for comp in tail {
-            Self::push_element(&mut components, comp);
-        }
-        Path {
-            components,
-            relative: false,
-        }
-    }
-
+impl Path {
     pub fn from_str(path: &str) -> Self {
         let relative = path.starts_with(".");
         let mut components: Vec<PathComponent> = Vec::new();
@@ -75,100 +290,11 @@ impl Path {
         }
     }
 
-    pub fn is_relative(&self) -> bool {
-        self.relative
-    }
-
-    pub fn contains_named_component(&self) -> bool {
-        self.components.iter().any(|c| c.is_named())
-    }
-
     pub fn contains_name(&self, name: &str) -> bool {
         self.components.iter().any(|c| match c {
-            PathComponent::Name(s) => **s == name,
+            PathComponent::Name(s) => *s == name,
             _ => false,
         })
-    }
-
-    pub fn len(&self) -> usize {
-        self.components.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.components.is_empty()
-    }
-
-    pub fn first(&self) -> Option<&PathComponent> {
-        self.components.first()
-    }
-
-    pub fn first_mut(&mut self) -> Option<&mut PathComponent> {
-        self.components.first_mut()
-    }
-
-    pub fn last(&self) -> Option<&PathComponent> {
-        self.components.last()
-    }
-
-    pub fn last_mut(&mut self) -> Option<&mut PathComponent> {
-        self.components.last_mut()
-    }
-
-    pub fn split_head(&self) -> (Option<&PathComponent>, Path) {
-        if let Some((first, tail)) = self.components.split_first() {
-            (
-                Some(first),
-                Path {
-                    components: tail.to_owned(),
-                    relative: true,
-                },
-            )
-        } else {
-            (None, Path::relative_self())
-        }
-    }
-
-    pub fn as_slice(&self) -> &[PathComponent] {
-        self.components.as_slice()
-    }
-
-    pub fn as_mut_slice(&mut self) -> &mut [PathComponent] {
-        self.components.as_mut_slice()
-    }
-
-    pub fn get<I>(&self, index: I) -> Option<&<I as SliceIndex<[PathComponent]>>::Output>
-    where
-        I: SliceIndex<[PathComponent]>,
-    {
-        self.components.get(index)
-    }
-
-    pub fn get_mut<I>(
-        &mut self,
-        index: I,
-    ) -> Option<&mut <I as SliceIndex<[PathComponent]>>::Output>
-    where
-        I: SliceIndex<[PathComponent]>,
-    {
-        self.components.get_mut(index)
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &PathComponent> {
-        self.components.iter()
-    }
-
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut PathComponent> {
-        self.components.iter_mut()
-    }
-
-    pub fn push(&mut self, component: PathComponent) {
-        Self::push_element(&mut self.components, component);
-    }
-}
-
-impl From<Path> for Vec<PathComponent> {
-    fn from(path: Path) -> Self {
-        path.components
     }
 }
 
@@ -177,73 +303,6 @@ impl std::str::FromStr for Path {
 
     fn from_str(path: &str) -> Result<Self, ()> {
         Ok(Path::from_str(path))
-    }
-}
-
-impl Default for Path {
-    fn default() -> Self {
-        Path {
-            components: Vec::default(),
-            relative: false,
-        }
-    }
-}
-
-impl<I> std::ops::Index<I> for Path
-where
-    I: SliceIndex<[PathComponent]>,
-{
-    type Output = <I as SliceIndex<[PathComponent]>>::Output;
-
-    fn index(&self, index: I) -> &<Path as std::ops::Index<I>>::Output {
-        &self.components[index]
-    }
-}
-
-impl<I> std::ops::IndexMut<I> for Path
-where
-    I: SliceIndex<[PathComponent]>,
-{
-    fn index_mut(&mut self, index: I) -> &mut <Path as std::ops::Index<I>>::Output {
-        &mut self.components[index]
-    }
-}
-
-impl IntoIterator for Path {
-    type Item = PathComponent;
-    type IntoIter = <Vec<PathComponent> as IntoIterator>::IntoIter;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.components.into_iter()
-    }
-}
-
-impl<'a> IntoIterator for &'a Path {
-    type Item = &'a PathComponent;
-    type IntoIter = <&'a Vec<PathComponent> as IntoIterator>::IntoIter;
-
-    fn into_iter(self) -> Self::IntoIter {
-        (&self.components).into_iter()
-    }
-}
-
-impl<'a> IntoIterator for &'a mut Path {
-    type Item = &'a mut PathComponent;
-    type IntoIter = <&'a mut Vec<PathComponent> as IntoIterator>::IntoIter;
-
-    fn into_iter(self) -> Self::IntoIter {
-        (&mut self.components).into_iter()
-    }
-}
-
-impl Extend<PathComponent> for Path {
-    fn extend<I>(&mut self, iter: I)
-    where
-        I: IntoIterator<Item = PathComponent>,
-    {
-        for component in iter {
-            self.push(component)
-        }
     }
 }
 
@@ -263,14 +322,6 @@ impl Display for Path {
 }
 
 impl PathComponent {
-    pub fn from_u32(i: u32) -> PathComponent {
-        PathComponent::Index(i)
-    }
-
-    pub fn parent() -> PathComponent {
-        PathComponent::Parent
-    }
-
     pub fn from_str(s: &str) -> Option<PathComponent> {
         if let Ok(i) = s.parse::<u32>() {
             Some(PathComponent::Index(i))
@@ -283,14 +334,6 @@ impl PathComponent {
         }
     }
 
-    pub fn is_named(&self) -> bool {
-        if let PathComponent::Name(_) = self {
-            true
-        } else {
-            false
-        }
-    }
-
     pub fn as_name(&self) -> Option<&str> {
         if let PathComponent::Name(s) = self {
             Some(s)
@@ -298,25 +341,13 @@ impl PathComponent {
             None
         }
     }
+}
 
-    pub fn is_index(&self) -> bool {
-        if let PathComponent::Index(_) = self {
-            true
-        } else {
-            false
-        }
-    }
+impl std::str::FromStr for PathComponent {
+    type Err = ();
 
-    pub fn as_index(&self) -> Option<u32> {
-        if let PathComponent::Index(i) = self {
-            Some(*i)
-        } else {
-            None
-        }
-    }
-
-    pub fn is_parent(&self) -> bool {
-        &PathComponent::Parent == self
+    fn from_str(path: &str) -> Result<Self, ()> {
+        PathComponent::from_str(path).ok_or(())
     }
 }
 
@@ -327,6 +358,78 @@ impl Display for PathComponent {
             Index(i) => write!(fmt, "{}", i),
             Name(s) => write!(fmt, "{}", s),
             Parent => write!(fmt, "^"),
+        }
+    }
+}
+
+create_impls!(PathRef, PathRefComponent);
+
+impl PathRef {
+    pub fn from_str(path: &str, string_arena: &mut StringArena) -> Self {
+        let relative = path.starts_with(".");
+        let mut components: Vec<PathRefComponent> = Vec::new();
+        for comp in path.split(".").filter_map(|s| PathRefComponent::from_str(s, string_arena)) {
+            Self::push_element(&mut components, comp);
+        }
+        PathRef {
+            components,
+            relative,
+        }
+    }
+
+    pub fn contains_name(&self, name: &str, string_arena: &StringArena) -> bool {
+        self.components.iter().any(|c| match c {
+            PathRefComponent::Name(s) => string_arena.resolve(*s) == Some(name),
+            _ => false,
+        })
+    }
+
+    pub fn to_string(&self, string_arena: &StringArena) -> Option<String> {
+        let mut path = String::new();path.push_str("test");
+        if self.relative {
+            path.push('.');
+        }
+        for (i, comp) in self.components.iter().enumerate() {
+            if i > 0 {
+                path.push('.');
+            }
+            if let Some(s) = comp.to_string(string_arena) {
+                path.push_str(&s);
+            } else {
+                return None;
+            }
+        }
+
+        Some(path)
+    }
+}
+
+impl PathRefComponent {
+    pub fn from_str(s: &str, string_arena: &mut StringArena) -> Option<PathRefComponent> {
+        if let Ok(i) = s.parse::<u32>() {
+            Some(PathRefComponent::Index(i))
+        } else if s == "^" {
+            Some(PathRefComponent::Parent)
+        } else if !s.is_empty() && !s.contains(".") {
+            Some(PathRefComponent::Name(string_arena.get_or_intern(s)))
+        } else {
+            None
+        }
+    }
+
+    pub fn as_name<'story>(&self, string_arena: &'story StringArena) -> Option<&'story str> {
+        if let PathRefComponent::Name(s) = self {
+            string_arena.resolve(*s)
+        } else {
+            None
+        }
+    }
+
+    pub fn to_string<'story>(&self, string_arena: &'story StringArena) -> Option<Cow<'story, str>> {
+        match self {
+            PathRefComponent::Name(s) => string_arena.resolve(*s).map(|s| s.into()),
+            PathRefComponent::Index(i) => Some(i.to_string().into()),
+            PathRefComponent::Parent => Some("^".into()),
         }
     }
 }
