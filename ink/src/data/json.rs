@@ -3,11 +3,12 @@ use super::super::{
     Thread, VariablesState,
 };
 use super::{
-    ChoiceFlags, ChoicePoint, Container, ControlCommand, CountFlags, Divert, DivertTarget,
+    ChoiceFlags, ChoicePoint, Container, ContainerNode, ControlCommand, CountFlags, Divert,
+    DivertTarget,
     Error::*,
     List, ListDefinition, ListDefinitionsMap, ListItem, NativeFunction,
     Object::{self, *},
-    PathRef, PushPopType, Story, Value, VariableAssignment, VariableReference, VariableScope,
+    Path, PushPopType, Story, Value, VariableAssignment, VariableReference, VariableScope,
 };
 use failure::{bail, ensure, Fallible};
 use log::{trace, warn};
@@ -40,7 +41,11 @@ pub(crate) fn value_to_story(value: serde_json::Value) -> Fallible<Story> {
     let mut string_arena = StringArena::new();
 
     // Deserialize root container and list definitions
-    let root = value_to_container(require(value, "root")?, None, &mut string_arena)?;
+    let root = Object::Container(value_to_container(
+        require(value, "root")?,
+        None,
+        &mut string_arena,
+    )?);
     let list_definitions = value
         .get("listDefs")
         .map(|v| value_to_list_definitions(v, &mut string_arena))
@@ -57,7 +62,7 @@ pub(crate) fn value_to_story(value: serde_json::Value) -> Fallible<Story> {
 pub(crate) fn story_to_value(story: &Story) -> serde_json::Value {
     json!({
         "inkVersion": CURRENT_FORMAT_VERSION,
-        "root": container_to_value(&story.root, story, true),
+        "root": container_to_value(story.root(), story, true),
         "listDefs": list_definitions_to_value(&story.list_definitions, story),
      })
 }
@@ -221,7 +226,11 @@ fn value_to_container(
         // Deserialize all unnamed contents, skipping the special last array element
         let mut content = Vec::with_capacity(array.len() - 1);
         for value in &array[..array.len() - 1] {
-            content.push(value_to_ink_object(value, None, string_arena)?);
+            content.push(ContainerNode::new(value_to_ink_object(
+                value,
+                None,
+                string_arena,
+            )?));
         }
 
         // The last container element has the named contents, as well as special container fields
@@ -234,8 +243,10 @@ fn value_to_container(
                     continue;
                 }
                 let key = string_arena.get_or_intern(&key[..]);
-                named_only_content
-                    .insert(key, value_to_ink_object(value, Some(key), string_arena)?);
+                named_only_content.insert(
+                    key,
+                    ContainerNode::new(value_to_ink_object(value, Some(key), string_arena)?),
+                );
             }
         }
 
@@ -271,7 +282,7 @@ fn container_to_value(
     let mut array: Vec<_> = container
         .content
         .iter()
-        .map(|v| ink_object_to_value(v, story))
+        .map(|v| ink_object_to_value(&v.object, story))
         .collect();
 
     // Only serialize final named only contents if needed, otherwise a null
@@ -285,7 +296,7 @@ fn container_to_value(
             .map(|(key, content)| {
                 (
                     story.resolve_str(*key).to_string(),
-                    ink_object_to_value(content, story),
+                    ink_object_to_value(&content.object, story),
                 )
             }).collect();
 
@@ -353,7 +364,7 @@ fn json_object_to_ink_object(
             let target = if value.get("var").is_some() {
                 DivertTarget::Variable(string_arena.get_or_intern(target_str))
             } else {
-                DivertTarget::Path(PathRef::from_str(target_str, string_arena))
+                DivertTarget::Path(Path::from_str(target_str, string_arena))
             };
             Divert(Divert {
                 target,
@@ -803,15 +814,14 @@ fn value_to_callstack_element<'story>(
 
         match story.get_container_at_path(&path) {
             SearchResult::Exact(c) => Pointer::new(c, Some(pointer_index)),
-            SearchResult::Approximate(c) => {
+            SearchResult::Partial(c, _) => {
                 warn!(
                     "exact story path '{}' not found, approximated to '{}' to recover",
                     story.path_to_string(&path),
-                    story.path_to_string(&c.path_ref())
+                    story.path_to_string(&c.path())
                 );
                 Pointer::new(c, Some(pointer_index))
             }
-            SearchResult::None => bail!(PathNotFound(story.path_to_string(&path))),
         }
     } else {
         Pointer::default()
@@ -852,7 +862,7 @@ fn callstack_element_to_value(element: &CallStackElement, story: &Story) -> serd
         obj.insert(
             "cPath".into(),
             story
-                .path_to_string(&element.pointer.container.unwrap().path_ref())
+                .path_to_string(&element.pointer.container.unwrap().path())
                 .into(),
         );
         obj.insert("idx".into(), element.pointer.index.unwrap().into());
@@ -967,19 +977,15 @@ fn require_str<'a>(value: &'a serde_json::Value, key: &str) -> Fallible<&'a str>
         .ok_or_else(|| InvalidJsonFormat(format!("expected string value for '{}'", key)).into())
 }
 
-fn get_path(
-    value: &serde_json::Value,
-    key: &str,
-    string_arena: &mut StringArena,
-) -> Option<PathRef> {
-    get_str(value, key).map(|s| PathRef::from_str(s, string_arena))
+fn get_path(value: &serde_json::Value, key: &str, string_arena: &mut StringArena) -> Option<Path> {
+    get_str(value, key).map(|s| Path::from_str(s, string_arena))
 }
 
 fn require_path(
     value: &serde_json::Value,
     key: &str,
     string_arena: &mut StringArena,
-) -> Fallible<PathRef> {
+) -> Fallible<Path> {
     get_path(value, key, string_arena).ok_or_else(|| {
         InvalidJsonFormat(format!("expected path string value for '{}'", key)).into()
     })

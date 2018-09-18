@@ -11,8 +11,7 @@ use std::{
 pub(crate) mod json;
 mod path;
 
-pub(crate) use path::PathRef;
-pub use path::{Path, PathComponent};
+pub(crate) use path::{Path, PathComponent};
 
 #[derive(Debug, Fail)]
 pub enum Error {
@@ -26,7 +25,7 @@ pub enum Error {
 
 #[derive(Debug, Clone)]
 pub struct Story {
-    root: Container,
+    root: Object, // Always a Container
     list_definitions: ListDefinitionsMap,
     // Would rather not have this interior mutability, but story state doesn't maintain a separate arena
     string_arena: RefCell<StringArena>,
@@ -51,8 +50,14 @@ pub(crate) enum Object {
 pub(crate) struct Container {
     name: Option<InternStr>,
     count_flags: CountFlags,
-    content: Vec<Object>,
-    named_only_content: HashMap<InternStr, Object>,
+    content: Vec<ContainerNode>,
+    named_only_content: HashMap<InternStr, ContainerNode>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ContainerNode {
+    path: Path,
+    object: Object,
 }
 
 #[derive(Debug, Clone)]
@@ -60,7 +65,7 @@ pub(crate) enum Value {
     Int(i32),
     Float(f32),
     String(InternStr),
-    DivertTarget(PathRef),
+    DivertTarget(Path),
     VariablePointer(InternStr, VariableScope),
     List(List),
 }
@@ -174,20 +179,20 @@ pub(crate) struct Divert {
 
 #[derive(Debug, Clone)]
 pub(crate) enum DivertTarget {
-    Path(PathRef),
+    Path(Path),
     Variable(InternStr),
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct ChoicePoint {
-    path_on_choice: PathRef,
+    path_on_choice: Path,
     flags: ChoiceFlags,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) enum VariableReference {
     Name(InternStr),
-    Count(PathRef),
+    Count(Path),
 }
 
 #[derive(Debug, Clone)]
@@ -218,15 +223,32 @@ bitflags! {
 }
 
 impl Story {
+    fn init(&mut self) {
+        if let Object::Container(root) = &mut self.root {
+            // Root path is name or 0
+            let path: Path = match root.name {
+                Some(name) => PathComponent::Name(name).into(),
+                _ => Path::default(),
+            };
+            root.init(path)
+        } else {
+            panic!("story root not container");
+        }
+    }
+
     pub fn read_json<R: Read>(reader: R) -> Fallible<Self> {
         let decoder = DecodeReaderBytes::new(reader);
         let value = serde_json::from_reader(decoder)?;
-        json::value_to_story(value)
+        let mut story = json::value_to_story(value)?;
+        story.init();
+        Ok(story)
     }
 
     pub fn from_json_str(s: &str) -> Fallible<Self> {
         let value = serde_json::from_str(s.as_ref())?;
-        json::value_to_story(value)
+        let mut story = json::value_to_story(value)?;
+        story.init();
+        Ok(story)
     }
 
     pub fn write_json<W: Write>(&self, writer: W) -> Fallible<()> {
@@ -242,7 +264,50 @@ impl Story {
             .expect("unexpected failure writing pretty json string")
     }
 
-    pub(crate) fn get_pointer_at_path<'story>(&'story self, path: &PathRef) -> Pointer<'story> {
+    pub(crate) fn root(&self) -> &Container {
+        // Wish there was a better way, but because we have to use Object rather than Container for root...
+        if let Object::Container(root) = &self.root {
+            root
+        } else {
+            panic!("story root not container");
+        }
+    }
+
+    pub(crate) fn resolve_absolute_path<'story>(
+        &'story self,
+        path: &Path,
+    ) -> SearchResult<'story, Object> {
+        let mut current = &self.root;
+        for (partial_index, comp) in path.iter().enumerate() {
+            if let Object::Container(container) = current {
+                match comp {
+                    PathComponent::Name(name) => {
+                        if let Some(node) = container.named_only_content.get(name) {
+                            current = &node.object;
+                        } else {
+                            // No child, so partial match with parent
+                            return SearchResult::Partial(current, partial_index);
+                        }
+                    }
+                    PathComponent::Index(index) => {
+                        if let Some(node) = container.content.get(*index as usize) {
+                            current = &node.object;
+                        } else {
+                            // No child, so partial match with parent
+                            return SearchResult::Partial(current, partial_index);
+                        }
+                    }
+                    PathComponent::Parent => {} // Ignore any parents, they'll all be at beginning of path
+                }
+            } else {
+                // Path expected more hierarchy, but we've hit a non-container
+                return SearchResult::Partial(current, partial_index);
+            }
+        }
+        SearchResult::Exact(current)
+    }
+
+    pub(crate) fn get_pointer_at_path<'story>(&'story self, path: &Path) -> Pointer<'story> {
         if path.is_empty() {
             return Pointer::default();
         }
@@ -252,7 +317,7 @@ impl Story {
 
     pub(crate) fn get_container_at_path<'story>(
         &'story self,
-        _path: &PathRef,
+        _path: &Path,
     ) -> SearchResult<'story, Container> {
         unimplemented!()
     }
@@ -269,14 +334,23 @@ impl Story {
         self.string_arena.borrow_mut().get_or_intern(s)
     }
 
-    pub(crate) fn path_to_string(&self, path: &PathRef) -> String {
+    pub(crate) fn path_to_string(&self, path: &Path) -> String {
         path.to_string(&self.string_arena.borrow())
             .expect("interned path did not resolve, somewhere a string was not interned properly")
     }
 }
 
 impl Container {
-    pub(crate) fn path_ref(&self) -> PathRef {
+    fn init(&mut self, path: Path) {
+        for (i, child) in self.content.iter_mut().enumerate() {
+            child.init(path.with_tail_component((i as u32).into()));
+        }
+        for (&name, child) in &mut self.named_only_content {
+            child.init(path.with_tail_component(name.into()));
+        }
+    }
+
+    pub(crate) fn path(&self) -> Path {
         unimplemented!()
     }
 }
@@ -288,6 +362,22 @@ impl Default for Container {
             count_flags: CountFlags::default(),
             content: Vec::default(),
             named_only_content: HashMap::default(),
+        }
+    }
+}
+
+impl ContainerNode {
+    fn init(&mut self, path: Path) {
+        if let Object::Container(container) = &mut self.object {
+            container.init(path.clone());
+        }
+        self.path = path;
+    }
+
+    fn new(object: Object) -> Self {
+        ContainerNode {
+            path: Path::default(),
+            object,
         }
     }
 }

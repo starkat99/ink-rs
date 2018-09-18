@@ -11,8 +11,8 @@ use std::{
 
 mod data;
 
-use data::PathRef;
-pub use data::{Error, Path, PathComponent, Story};
+use data::Path;
+pub use data::{Error, Story};
 
 pub(crate) type InternStr = string_interner::Sym;
 pub(crate) type StringArena = string_interner::StringInterner<InternStr>;
@@ -63,8 +63,8 @@ pub(crate) struct Thread<'story> {
 #[derive(Debug, Clone)]
 pub(crate) struct Choice<'story> {
     text: InternStr,
-    target_path: PathRef,
-    source_path: PathRef,
+    target_path: Path,
+    source_path: Path,
     index: u32,
     original_thread_index: u32,
     thread_at_generation: Cow<'story, Thread<'story>>,
@@ -76,10 +76,9 @@ pub(crate) struct VariablesState {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum SearchResult<'story, T: Debug + Clone + 'story> {
+pub(crate) enum SearchResult<'story, T: Debug + 'story> {
     Exact(&'story T),
-    Approximate(&'story T),
-    None,
+    Partial(&'story T, usize),
 }
 
 impl<'story> StoryState<'story> {
@@ -147,7 +146,7 @@ impl<'story> Pointer<'story> {
         self.container.is_none()
     }
 
-    pub(crate) fn path(&self) -> PathRef {
+    pub(crate) fn path(&self) -> Path {
         unimplemented!()
     }
 }
