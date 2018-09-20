@@ -102,19 +102,17 @@ impl<'story> StoryState<'story> {
     pub fn read_json<R: Read>(story: &'story Story, reader: R) -> Fallible<Self> {
         let decoder = DecodeReaderBytes::new(reader);
         let value = serde_json::from_reader(decoder)?;
-        data::json::value_to_story_state(value, story)
+        data::json::value_to_story_state(&value, story)
     }
 
     pub fn from_json_str(story: &'story Story, s: &str) -> Fallible<Self> {
-        let value = serde_json::from_str(s.as_ref())?;
-        data::json::value_to_story_state(value, story)
+        let value = serde_json::from_str(s)?;
+        data::json::value_to_story_state(&value, story)
     }
 
     pub fn write_json<W: Write>(&self, writer: W) -> Fallible<()> {
-        Ok(serde_json::to_writer(
-            writer,
-            &data::json::story_state_to_value(self),
-        )?)
+        serde_json::to_writer(writer, &data::json::story_state_to_value(self))?;
+        Ok(())
     }
 
     pub fn to_json_string(&self) -> String {

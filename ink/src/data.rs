@@ -230,7 +230,7 @@ impl Story {
                 Some(name) => PathComponent::Name(name).into(),
                 _ => Path::default(),
             };
-            root.init(path)
+            root.init(&path)
         } else {
             panic!("story root not container");
         }
@@ -239,20 +239,21 @@ impl Story {
     pub fn read_json<R: Read>(reader: R) -> Fallible<Self> {
         let decoder = DecodeReaderBytes::new(reader);
         let value = serde_json::from_reader(decoder)?;
-        let mut story = json::value_to_story(value)?;
+        let mut story = json::value_to_story(&value)?;
         story.init();
         Ok(story)
     }
 
     pub fn from_json_str(s: &str) -> Fallible<Self> {
-        let value = serde_json::from_str(s.as_ref())?;
-        let mut story = json::value_to_story(value)?;
+        let value = serde_json::from_str(s)?;
+        let mut story = json::value_to_story(&value)?;
         story.init();
         Ok(story)
     }
 
     pub fn write_json<W: Write>(&self, writer: W) -> Fallible<()> {
-        Ok(serde_json::to_writer(writer, &json::story_to_value(self))?)
+        serde_json::to_writer(writer, &json::story_to_value(self))?;
+        Ok(())
     }
 
     pub fn to_json_string(&self) -> String {
@@ -341,7 +342,7 @@ impl Story {
 }
 
 impl Container {
-    fn init(&mut self, path: Path) {
+    fn init(&mut self, path: &Path) {
         for (i, child) in self.content.iter_mut().enumerate() {
             child.init(path.with_tail_component((i as u32).into()));
         }
@@ -369,7 +370,7 @@ impl Default for Container {
 impl ContainerNode {
     fn init(&mut self, path: Path) {
         if let Object::Container(container) = &mut self.object {
-            container.init(path.clone());
+            container.init(&path);
         }
         self.path = path;
     }

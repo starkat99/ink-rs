@@ -37,10 +37,10 @@ impl Path {
     }
 
     pub fn from_str(path: &str, string_arena: &mut StringArena) -> Self {
-        let relative = path.starts_with(".");
+        let relative = path.starts_with('.');
         let mut components: Vec<PathComponent> = Vec::new();
         for comp in path
-            .split(".")
+            .split('.')
             .filter_map(|s| PathComponent::from_str(s, string_arena))
         {
             Self::push_element(&mut components, comp);
@@ -356,7 +356,7 @@ impl PathComponent {
             Some(PathComponent::Index(i))
         } else if s == "^" {
             Some(PathComponent::Parent)
-        } else if !s.is_empty() && !s.contains(".") {
+        } else if !s.is_empty() && !s.contains('.') {
             Some(PathComponent::Name(string_arena.get_or_intern(s)))
         } else {
             None
@@ -375,7 +375,7 @@ impl PathComponent {
         PathComponent::Parent
     }
 
-    pub fn is_named(&self) -> bool {
+    pub fn is_named(self) -> bool {
         if let PathComponent::Name(_) = self {
             true
         } else {
@@ -383,15 +383,15 @@ impl PathComponent {
         }
     }
 
-    pub fn as_name<'story>(&self, string_arena: &'story StringArena) -> Option<&'story str> {
+    pub fn as_name(self, string_arena: &StringArena) -> Option<&str> {
         if let PathComponent::Name(s) = self {
-            string_arena.resolve(*s)
+            string_arena.resolve(s)
         } else {
             None
         }
     }
 
-    pub fn is_index(&self) -> bool {
+    pub fn is_index(self) -> bool {
         if let PathComponent::Index(_) = self {
             true
         } else {
@@ -399,21 +399,21 @@ impl PathComponent {
         }
     }
 
-    pub fn as_index(&self) -> Option<u32> {
+    pub fn as_index(self) -> Option<u32> {
         if let PathComponent::Index(i) = self {
-            Some(*i)
+            Some(i)
         } else {
             None
         }
     }
 
-    pub fn is_parent(&self) -> bool {
-        &PathComponent::Parent == self
+    pub fn is_parent(self) -> bool {
+        PathComponent::Parent == self
     }
 
-    pub fn to_string<'story>(&self, string_arena: &'story StringArena) -> Option<Cow<'story, str>> {
+    pub fn to_string(self, string_arena: &StringArena) -> Option<Cow<'_, str>> {
         match self {
-            PathComponent::Name(s) => string_arena.resolve(*s).map(|s| s.into()),
+            PathComponent::Name(s) => string_arena.resolve(s).map(|s| s.into()),
             PathComponent::Index(i) => Some(i.to_string().into()),
             PathComponent::Parent => Some("^".into()),
         }

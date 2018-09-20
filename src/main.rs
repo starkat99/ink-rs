@@ -81,7 +81,7 @@ fn main() -> Fallible<()> {
 
     // Play in interactive mode
     if !args.is_present("compile") {
-        begin(story);
+        begin(&story);
     }
 
     Ok(())
@@ -109,6 +109,6 @@ fn validate_not_dir(s: &OsStr) -> Result<(), OsString> {
     }
 }
 
-fn begin(story: Story) {
+fn begin(story: &Story) {
     let _state = StoryState::new(&story);
 }

@@ -21,8 +21,7 @@ const MIN_FORMAT_VERSION: u64 = 18;
 const CURRENT_SAVE_STATE_VERSION: u64 = 8;
 const MIN_SAVE_STATE_VERSION: u64 = 8;
 
-pub(crate) fn value_to_story(value: serde_json::Value) -> Fallible<Story> {
-    let value = &value;
+pub(crate) fn value_to_story(value: &serde_json::Value) -> Fallible<Story> {
     // Check format version
     let version = get_u64(value, "inkVersion")
         .ok_or_else(|| InvalidJsonFormat("missing ink format version".into()))?;
@@ -68,10 +67,9 @@ pub(crate) fn story_to_value(story: &Story) -> serde_json::Value {
 }
 
 pub(crate) fn value_to_story_state<'story>(
-    value: serde_json::Value,
+    value: &serde_json::Value,
     story: &'story Story,
 ) -> Fallible<StoryState<'story>> {
-    let value = &value;
     let version = get_u64(value, "inkSaveVersion")
         .ok_or_else(|| InvalidJsonFormat("missing ink save format version".into()))?;
     ensure!(
@@ -379,7 +377,7 @@ fn json_object_to_ink_object(
         else if let Some(path_on_choice) = get_path(value, "*", string_arena) {
             let flags = get_u32(value, "flg")
                 .and_then(ChoiceFlags::from_bits)
-                .unwrap_or(ChoiceFlags::default());
+                .unwrap_or_default();
             Choice(ChoicePoint {
                 path_on_choice,
                 flags,
@@ -445,14 +443,14 @@ fn value_to_ink_object(
         Number(n) => Value(
             n.as_i64()
                 .map(|i| Value::Int(i as i32))
-                .or(n.as_f64().map(|f| Value::Float(f as f32)))
+                .or_else(|| n.as_f64().map(|f| Value::Float(f as f32)))
                 .ok_or_else(|| InvalidJsonFormat(format!("invalid number value '{}'", value)))?,
         ),
         Array(_) => Container(value_to_container(value, name, string_arena)?),
         Object(_) => json_object_to_ink_object(value, string_arena)?,
 
         // Regular string values
-        String(s) if s.starts_with("^") => {
+        String(s) if s.starts_with('^') => {
             Value(Value::String(string_arena.get_or_intern(&s[1..])))
         }
         String(s) if s == "\n" => Value(Value::String(string_arena.get_or_intern("\n"))),
