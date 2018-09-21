@@ -90,7 +90,7 @@ pub(crate) struct ListDefinitionsMap {
     lists: HashMap<InternStr, ListDefinition>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub(crate) enum ControlCommand {
     EvalStart,
     EvalOutput,
@@ -118,7 +118,7 @@ pub(crate) enum ControlCommand {
     ListRandom,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub(crate) enum NativeFunction {
     Add,
     Subtract,

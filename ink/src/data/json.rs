@@ -11,16 +11,118 @@ use super::{
     Path, PushPopType, Story, Value, VariableAssignment, VariableReference, VariableScope,
 };
 use failure::{bail, ensure, Fallible};
+use lazy_static::lazy_static;
 use log::{trace, warn};
 use serde_json::json;
 use std::{borrow::Cow, cell::RefCell, collections::HashMap};
 
+/// Current version of compiled ink JSON the runtime writes
 const CURRENT_FORMAT_VERSION: u64 = 19;
+/// Minimum supported version of compiled ink JSON that can be read
 const MIN_FORMAT_VERSION: u64 = 18;
 
+/// Current version of story save state JSON the runtime writes
 const CURRENT_SAVE_STATE_VERSION: u64 = 8;
+/// Minimum supported version of story save state JSON that can be read
 const MIN_SAVE_STATE_VERSION: u64 = 8;
 
+// TODO Replace lazy static maps with phf crate someday?
+lazy_static! {
+    /// List of simple enum values and their string serialization
+    static ref OBJECT_MAP_TUPLES: &'static [(Object, &'static str)] = &[
+        (Void, "void"),
+        (Glue, "<>"),
+        // Control commands
+        (Control(ControlCommand::EvalStart), "ev"),
+        (Control(ControlCommand::EvalOutput), "out"),
+        (Control(ControlCommand::EvalEnd), "/ev"),
+        (Control(ControlCommand::Duplicate), "du"),
+        (Control(ControlCommand::PopEvaluatedValue), "pop"),
+        (Control(ControlCommand::PopFunction), "~ret"),
+        (Control(ControlCommand::PopTunnel), "->->"),
+        (Control(ControlCommand::BeginString), "str"),
+        (Control(ControlCommand::EndString), "/str"),
+        (Control(ControlCommand::NoOp), "nop"),
+        (Control(ControlCommand::ChoiceCount), "choiceCnt"),
+        (Control(ControlCommand::Turns), "turn"),
+        (Control(ControlCommand::TurnsSince), "turns"),
+        (Control(ControlCommand::ReadCount), "readc"),
+        (Control(ControlCommand::Random), "rnd"),
+        (Control(ControlCommand::SeedRandom), "srnd"),
+        (Control(ControlCommand::VisitIndex), "visit"),
+        (Control(ControlCommand::SequenceShuffleIndex), "seq"),
+        (Control(ControlCommand::StartThread), "thread"),
+        (Control(ControlCommand::Done), "done"),
+        (Control(ControlCommand::End), "end"),
+        (Control(ControlCommand::ListFromInt), "listInt"),
+        (Control(ControlCommand::ListRange), "range"),
+        (Control(ControlCommand::ListRandom), "lrnd"),
+        // Native Functions
+        (NativeCall(NativeFunction::Add), "+"),
+        (NativeCall(NativeFunction::Subtract), "-"),
+        (NativeCall(NativeFunction::Divide), "/"),
+        (NativeCall(NativeFunction::Multiply), "*"),
+        (NativeCall(NativeFunction::Modulo), "%"),
+        (NativeCall(NativeFunction::Negate), "_"),
+        (NativeCall(NativeFunction::Equal), "=="),
+        (NativeCall(NativeFunction::Greater), ">"),
+        (NativeCall(NativeFunction::Less), "<"),
+        (NativeCall(NativeFunction::GreaterOrEqual), ">="),
+        (NativeCall(NativeFunction::LessOrEqual), "<="),
+        (NativeCall(NativeFunction::NotEqual), "!="),
+        (NativeCall(NativeFunction::Not), "!"),
+        (NativeCall(NativeFunction::And), "&&"),
+        (NativeCall(NativeFunction::Or), "||"),
+        (NativeCall(NativeFunction::Min), "MIN"),
+        (NativeCall(NativeFunction::Max), "MAX"),
+        (NativeCall(NativeFunction::Power), "POW"),
+        (NativeCall(NativeFunction::Floor), "FLOOR"),
+        (NativeCall(NativeFunction::Ceiling), "CEILING"),
+        (NativeCall(NativeFunction::Int), "INT"),
+        (NativeCall(NativeFunction::Float), "FLOAT"),
+        (NativeCall(NativeFunction::Has), "?"),
+        (NativeCall(NativeFunction::HasNot), "!?"),
+        (NativeCall(NativeFunction::Intersect), "L^"),
+        (NativeCall(NativeFunction::ListMin), "LIST_MIN"),
+        (NativeCall(NativeFunction::ListMax), "LIST_MAX"),
+        (NativeCall(NativeFunction::All), "LIST_ALL"),
+        (NativeCall(NativeFunction::Count), "LIST_COUNT"),
+        (NativeCall(NativeFunction::ValueOfList), "LIST_VALUE"),
+        (NativeCall(NativeFunction::Invert), "LIST_INVERT"),
+    ];
+    /// Map of strings to simple enum values for deserialization
+    static ref STR_TO_OBJECT_MAP: HashMap<&'static str, Object> = {
+        let mut map = HashMap::with_capacity(OBJECT_MAP_TUPLES.len());
+        for pair in *OBJECT_MAP_TUPLES {
+            map.insert(pair.1, pair.0.clone());
+        }
+        map
+    };
+    /// Map of control commands to strings for serialization
+    static ref CONTROL_COMMAND_TO_STR_MAP: HashMap<ControlCommand, &'static str> = {
+        let mut map = HashMap::with_capacity(OBJECT_MAP_TUPLES.len());
+        for pair in *OBJECT_MAP_TUPLES {
+            if let Control(command) = pair.0 {
+                map.insert(command, pair.1);
+            }
+        }
+        map.shrink_to_fit();
+        map
+    };
+    /// Map of control commands to strings for serialization
+    static ref NATIVE_FUNCTION_TO_STR_MAP: HashMap<NativeFunction, &'static str> = {
+        let mut map = HashMap::with_capacity(OBJECT_MAP_TUPLES.len());
+        for pair in *OBJECT_MAP_TUPLES {
+            if let NativeCall(func) = pair.0 {
+                map.insert(func, pair.1);
+            }
+        }
+        map.shrink_to_fit();
+        map
+    };
+}
+
+/// Deserialize a `Story` from a JSON value.
 pub(crate) fn value_to_story(value: &serde_json::Value) -> Fallible<Story> {
     // Check format version
     let version = get_u64(value, "inkVersion")
@@ -58,6 +160,7 @@ pub(crate) fn value_to_story(value: &serde_json::Value) -> Fallible<Story> {
     })
 }
 
+/// Serialize a `Story` to a JSON value.
 pub(crate) fn story_to_value(story: &Story) -> serde_json::Value {
     json!({
         "inkVersion": CURRENT_FORMAT_VERSION,
@@ -66,10 +169,12 @@ pub(crate) fn story_to_value(story: &Story) -> serde_json::Value {
      })
 }
 
+/// Deserialize a `StoryState` from a JSON value.
 pub(crate) fn value_to_story_state<'story>(
     value: &serde_json::Value,
     story: &'story Story,
 ) -> Fallible<StoryState<'story>> {
+    // Check format version
     let version = get_u64(value, "inkSaveVersion")
         .ok_or_else(|| InvalidJsonFormat("missing ink save format version".into()))?;
     ensure!(
@@ -83,6 +188,7 @@ pub(crate) fn value_to_story_state<'story>(
         );
     }
 
+    // Deserialize all the values
     let current_turn_index = require_u32(value, "turnIdx")?;
     let story_seed = require_u32(value, "storySeed")?;
     let previous_random = require_u32(value, "previousRandom")?;
@@ -145,6 +251,7 @@ pub(crate) fn value_to_story_state<'story>(
         current_choices.push(value_to_choice(value, story, &callstack, choice_threads)?);
     }
 
+    trace!("deserialized story save state JSON file");
     Ok(StoryState {
         story,
         current_turn_index,
@@ -163,6 +270,7 @@ pub(crate) fn value_to_story_state<'story>(
     })
 }
 
+/// Serialize a `StoryState` into a JSON value.
 pub(crate) fn story_state_to_value(state: &StoryState) -> serde_json::Value {
     let mut value = json!({
         "inkFormatVersion": CURRENT_FORMAT_VERSION,
@@ -179,6 +287,7 @@ pub(crate) fn story_state_to_value(state: &StoryState) -> serde_json::Value {
         "callstackThreads": callstack_to_value(&state.callstack, state.story),
     });
 
+    // Add optional values
     let obj = value.as_object_mut().unwrap();
 
     let choice_threads = state
@@ -212,6 +321,7 @@ pub(crate) fn story_state_to_value(state: &StoryState) -> serde_json::Value {
     value
 }
 
+/// Deserialize a `Container`
 fn value_to_container(
     value: &serde_json::Value,
     name: Option<InternStr>,
@@ -271,6 +381,7 @@ fn value_to_container(
     }
 }
 
+/// Serialize a `Container`
 fn container_to_value(
     container: &Container,
     story: &Story,
@@ -298,6 +409,7 @@ fn container_to_value(
                 )
             }).collect();
 
+        // Add name and flags if needed
         if serialize_name {
             if let Some(name) = &container.name {
                 last.insert(
@@ -318,6 +430,7 @@ fn container_to_value(
     array.into()
 }
 
+/// Deserialize an ink object from a JSON map value
 fn json_object_to_ink_object(
     value: &serde_json::Value,
     string_arena: &mut StringArena,
@@ -433,6 +546,7 @@ fn json_object_to_ink_object(
     )
 }
 
+/// Deserialize an ink object
 fn value_to_ink_object(
     value: &serde_json::Value,
     name: Option<InternStr>,
@@ -449,97 +563,47 @@ fn value_to_ink_object(
         Array(_) => Container(value_to_container(value, name, string_arena)?),
         Object(_) => json_object_to_ink_object(value, string_arena)?,
 
+        // Control commands, Native Functions, Void, and Glue
+        String(s) => if let Some(obj) = STR_TO_OBJECT_MAP.get(&s[..]) {
+            obj.clone()
+        // Standalone newline
+        } else if s == "\n" {
+            Value(Value::String(string_arena.get_or_intern("\n")))
         // Regular string values
-        String(s) if s.starts_with('^') => {
+        } else if s.starts_with('^') {
             Value(Value::String(string_arena.get_or_intern(&s[1..])))
-        }
-        String(s) if s == "\n" => Value(Value::String(string_arena.get_or_intern("\n"))),
-
-        // TODO Could match the strings faster with hash tables
-        // Control commands
-        String(s) if s == "ev" => Control(ControlCommand::EvalStart),
-        String(s) if s == "out" => Control(ControlCommand::EvalOutput),
-        String(s) if s == "/ev" => Control(ControlCommand::EvalEnd),
-        String(s) if s == "du" => Control(ControlCommand::Duplicate),
-        String(s) if s == "pop" => Control(ControlCommand::PopEvaluatedValue),
-        String(s) if s == "~ret" => Control(ControlCommand::PopFunction),
-        String(s) if s == "->->" => Control(ControlCommand::PopTunnel),
-        String(s) if s == "str" => Control(ControlCommand::BeginString),
-        String(s) if s == "/str" => Control(ControlCommand::EndString),
-        String(s) if s == "nop" => Control(ControlCommand::NoOp),
-        String(s) if s == "choiceCnt" => Control(ControlCommand::ChoiceCount),
-        String(s) if s == "turn" => Control(ControlCommand::Turns),
-        String(s) if s == "turns" => Control(ControlCommand::TurnsSince),
-        String(s) if s == "readc" => Control(ControlCommand::ReadCount),
-        String(s) if s == "rnd" => Control(ControlCommand::Random),
-        String(s) if s == "srnd" => Control(ControlCommand::SeedRandom),
-        String(s) if s == "visit" => Control(ControlCommand::VisitIndex),
-        String(s) if s == "seq" => Control(ControlCommand::SequenceShuffleIndex),
-        String(s) if s == "thread" => Control(ControlCommand::StartThread),
-        String(s) if s == "done" => Control(ControlCommand::Done),
-        String(s) if s == "end" => Control(ControlCommand::End),
-        String(s) if s == "listInt" => Control(ControlCommand::ListFromInt),
-        String(s) if s == "range" => Control(ControlCommand::ListRange),
-        String(s) if s == "lrnd" => Control(ControlCommand::ListRandom),
-
-        // Native function calls
-        String(s) if s == "+" => NativeCall(NativeFunction::Add),
-        String(s) if s == "-" => NativeCall(NativeFunction::Subtract),
-        String(s) if s == "/" => NativeCall(NativeFunction::Divide),
-        String(s) if s == "*" => NativeCall(NativeFunction::Multiply),
-        String(s) if s == "%" => NativeCall(NativeFunction::Modulo),
-        String(s) if s == "_" => NativeCall(NativeFunction::Negate),
-        String(s) if s == "==" => NativeCall(NativeFunction::Equal),
-        String(s) if s == ">" => NativeCall(NativeFunction::Greater),
-        String(s) if s == "<" => NativeCall(NativeFunction::Less),
-        String(s) if s == ">=" => NativeCall(NativeFunction::GreaterOrEqual),
-        String(s) if s == "<=" => NativeCall(NativeFunction::LessOrEqual),
-        String(s) if s == "!=" => NativeCall(NativeFunction::NotEqual),
-        String(s) if s == "!" => NativeCall(NativeFunction::Not),
-        String(s) if s == "&&" => NativeCall(NativeFunction::And),
-        String(s) if s == "||" => NativeCall(NativeFunction::Or),
-        String(s) if s == "MIN" => NativeCall(NativeFunction::Min),
-        String(s) if s == "MAX" => NativeCall(NativeFunction::Max),
-        String(s) if s == "POW" => NativeCall(NativeFunction::Power),
-        String(s) if s == "FLOOR" => NativeCall(NativeFunction::Floor),
-        String(s) if s == "CEILING" => NativeCall(NativeFunction::Ceiling),
-        String(s) if s == "INT" => NativeCall(NativeFunction::Int),
-        String(s) if s == "FLOAT" => NativeCall(NativeFunction::Float),
-        String(s) if s == "?" => NativeCall(NativeFunction::Has),
-        String(s) if s == "!?" => NativeCall(NativeFunction::HasNot),
-        String(s) if s == "L^" => NativeCall(NativeFunction::Intersect),
-        String(s) if s == "LIST_MIN" => NativeCall(NativeFunction::ListMin),
-        String(s) if s == "LIST_MAX" => NativeCall(NativeFunction::ListMax),
-        String(s) if s == "LIST_ALL" => NativeCall(NativeFunction::All),
-        String(s) if s == "LIST_COUNT" => NativeCall(NativeFunction::Count),
-        String(s) if s == "LIST_VALUE" => NativeCall(NativeFunction::ValueOfList),
-        String(s) if s == "LIST_INVERT" => NativeCall(NativeFunction::Invert),
-
-        // Misc
-        String(s) if s == "<>" => Glue,
-        String(s) if s == "void" => Void,
-        String(s) => bail!(InvalidJsonFormat(format!(
-            "unrecognized string value '{}'",
-            s
-        ))),
+        // Unrecognized strings
+        } else {
+            bail!(InvalidJsonFormat(format!(
+                "unrecognized string value '{}'",
+                s
+            )))
+        },
         Bool(_) => bail!(InvalidJsonFormat("unexpected boolean value".into())),
         Null => bail!(InvalidJsonFormat("unexpected null value".into())),
     })
 }
 
+/// Serialize an ink object
 fn ink_object_to_value(obj: &Object, story: &Story) -> serde_json::Value {
     match obj {
+        // Simple stuff
         Glue => json!("<>"),
         Void => json!("void"),
         Tag(text) => json!({ "#": story.resolve_str(*text).to_string() }),
+        Choice(choice) => {
+            json!({"*": story.path_to_string(&choice.path_on_choice), "flg": choice.flags.bits()})
+        }
+
+        // Conntainer
+        Container(container) => container_to_value(container, story, false),
+
+        // Variables
         Variable(VariableReference::Name(name)) => {
             json!({ "VAR?": story.resolve_str(*name).to_string() })
         }
         Variable(VariableReference::Count(path)) => json!({"CNT?": story.path_to_string(path)}),
-        Choice(choice) => {
-            json!({"*": story.path_to_string(&choice.path_on_choice), "flg": choice.flags.bits()})
-        }
-        Container(container) => container_to_value(container, story, false),
+        // Variable assignment
         Assignment(var_assign) => {
             let mut value = json!({
                 if var_assign.global {
@@ -557,6 +621,8 @@ fn ink_object_to_value(obj: &Object, story: &Story) -> serde_json::Value {
 
             value
         }
+
+        // Diverts
         Divert(divert) => {
             let mut value = json!({
                 match divert {
@@ -621,66 +687,13 @@ fn ink_object_to_value(obj: &Object, story: &Story) -> serde_json::Value {
         }
 
         // Control commands
-        Control(ControlCommand::EvalStart) => json!("ev"),
-        Control(ControlCommand::EvalOutput) => json!("out"),
-        Control(ControlCommand::EvalEnd) => json!("/ev"),
-        Control(ControlCommand::Duplicate) => json!("du"),
-        Control(ControlCommand::PopEvaluatedValue) => json!("pop"),
-        Control(ControlCommand::PopFunction) => json!("~ret"),
-        Control(ControlCommand::PopTunnel) => json!("->->"),
-        Control(ControlCommand::BeginString) => json!("str"),
-        Control(ControlCommand::EndString) => json!("/str"),
-        Control(ControlCommand::NoOp) => json!("nop"),
-        Control(ControlCommand::ChoiceCount) => json!("choiceCnt"),
-        Control(ControlCommand::Turns) => json!("turn"),
-        Control(ControlCommand::TurnsSince) => json!("turns"),
-        Control(ControlCommand::ReadCount) => json!("readc"),
-        Control(ControlCommand::Random) => json!("rnd"),
-        Control(ControlCommand::SeedRandom) => json!("srnd"),
-        Control(ControlCommand::VisitIndex) => json!("visit"),
-        Control(ControlCommand::SequenceShuffleIndex) => json!("seq"),
-        Control(ControlCommand::StartThread) => json!("thread"),
-        Control(ControlCommand::Done) => json!("done"),
-        Control(ControlCommand::End) => json!("end"),
-        Control(ControlCommand::ListFromInt) => json!("listInt"),
-        Control(ControlCommand::ListRange) => json!("range"),
-        Control(ControlCommand::ListRandom) => json!("lrnd"),
-
+        Control(command) => json!(CONTROL_COMMAND_TO_STR_MAP[command]),
         // Native function calls
-        NativeCall(NativeFunction::Add) => json!("+"),
-        NativeCall(NativeFunction::Subtract) => json!("-"),
-        NativeCall(NativeFunction::Divide) => json!("/"),
-        NativeCall(NativeFunction::Multiply) => json!("*"),
-        NativeCall(NativeFunction::Modulo) => json!("%"),
-        NativeCall(NativeFunction::Negate) => json!("_"),
-        NativeCall(NativeFunction::Equal) => json!("=="),
-        NativeCall(NativeFunction::Greater) => json!(">"),
-        NativeCall(NativeFunction::Less) => json!("<"),
-        NativeCall(NativeFunction::GreaterOrEqual) => json!(">="),
-        NativeCall(NativeFunction::LessOrEqual) => json!("<="),
-        NativeCall(NativeFunction::NotEqual) => json!("!="),
-        NativeCall(NativeFunction::Not) => json!("!"),
-        NativeCall(NativeFunction::And) => json!("&&"),
-        NativeCall(NativeFunction::Or) => json!("||"),
-        NativeCall(NativeFunction::Min) => json!("MIN"),
-        NativeCall(NativeFunction::Max) => json!("MAX"),
-        NativeCall(NativeFunction::Power) => json!("POW"),
-        NativeCall(NativeFunction::Floor) => json!("FLOOR"),
-        NativeCall(NativeFunction::Ceiling) => json!("CEILING"),
-        NativeCall(NativeFunction::Int) => json!("INT"),
-        NativeCall(NativeFunction::Float) => json!("FLOAT"),
-        NativeCall(NativeFunction::Has) => json!("?"),
-        NativeCall(NativeFunction::HasNot) => json!("!?"),
-        NativeCall(NativeFunction::Intersect) => json!("L^"),
-        NativeCall(NativeFunction::ListMin) => json!("LIST_MIN"),
-        NativeCall(NativeFunction::ListMax) => json!("LIST_MAX"),
-        NativeCall(NativeFunction::All) => json!("LIST_ALL"),
-        NativeCall(NativeFunction::Count) => json!("LIST_COUNT"),
-        NativeCall(NativeFunction::ValueOfList) => json!("LIST_VALUE"),
-        NativeCall(NativeFunction::Invert) => json!("LIST_INVERT"),
+        NativeCall(func) => json!(NATIVE_FUNCTION_TO_STR_MAP[func]),
     }
 }
 
+/// Deserialize named list definitions
 fn value_to_list_definitions(
     value: &serde_json::Value,
     string_arena: &mut StringArena,
@@ -711,6 +724,7 @@ fn value_to_list_definitions(
     }
 }
 
+/// Serialize named list definitions
 fn list_definitions_to_value(list_defs: &ListDefinitionsMap, story: &Story) -> serde_json::Value {
     list_defs
         .lists
@@ -727,6 +741,7 @@ fn list_definitions_to_value(list_defs: &ListDefinitionsMap, story: &Story) -> s
         .into()
 }
 
+/// Deserialize callstack state
 fn value_to_callstack<'story>(
     value: &serde_json::Value,
     story: &'story Story,
@@ -745,6 +760,7 @@ fn value_to_callstack<'story>(
     })
 }
 
+/// Serialize callstack state
 fn callstack_to_value(callstack: &CallStack, story: &Story) -> serde_json::Value {
     json!({
         "threadCounter": callstack.thread_counter,
@@ -752,6 +768,7 @@ fn callstack_to_value(callstack: &CallStack, story: &Story) -> serde_json::Value
     })
 }
 
+/// Deserialize thread state
 fn value_to_thread<'story>(
     value: &serde_json::Value,
     story: &'story Story,
@@ -778,12 +795,14 @@ fn value_to_thread<'story>(
     })
 }
 
+/// Serialize thread state
 fn thread_to_value(thread: &Thread, story: &Story) -> serde_json::Value {
     let mut value = json!({
         "threadIndex": thread.index,
         "callstack": thread.callstack.iter().map(|v| callstack_element_to_value(v, story)).collect::<Vec<_>>(),
     });
 
+    // Optional values
     if !thread.previous_pointer.is_null() {
         value.as_object_mut().unwrap().insert(
             "previousContentObject".into(),
@@ -794,6 +813,7 @@ fn thread_to_value(thread: &Thread, story: &Story) -> serde_json::Value {
     value
 }
 
+/// Deserialize callstack element state
 fn value_to_callstack_element<'story>(
     value: &serde_json::Value,
     story: &'story Story,
@@ -810,6 +830,7 @@ fn value_to_callstack_element<'story>(
     {
         let pointer_index = require_u32(value, "idx")?;
 
+        // Search for container path
         match story.get_container_at_path(&path) {
             SearchResult::Exact(c) => Pointer::new(c, Some(pointer_index)),
             SearchResult::Partial(c, _) => {
@@ -844,6 +865,7 @@ fn value_to_callstack_element<'story>(
     })
 }
 
+/// Serialize callstack element state
 fn callstack_element_to_value(element: &CallStackElement, story: &Story) -> serde_json::Value {
     let mut value = json!({
         "exp": element.in_expression_evaluation,
@@ -855,6 +877,7 @@ fn callstack_element_to_value(element: &CallStackElement, story: &Story) -> serd
         "temp": element.temp_vars.iter().map(|(name, value)| (story.resolve_str(*name).to_string(), ink_object_to_value(value, story))).collect::<HashMap<_, _>>(),
     });
 
+    // Optional values
     if !element.pointer.is_null() {
         let obj = value.as_object_mut().unwrap();
         obj.insert(
@@ -869,6 +892,7 @@ fn callstack_element_to_value(element: &CallStackElement, story: &Story) -> serd
     value
 }
 
+/// Deserialize choice state
 fn value_to_choice<'story>(
     value: &serde_json::Value,
     story: &'story Story,
@@ -885,6 +909,7 @@ fn value_to_choice<'story>(
     let target_path = require_path(value, "targetPath", &mut story.string_arena.borrow_mut())?;
     let original_thread_index = require_u32(value, "originalThreadIndex")?;
 
+    // Search for an existing thread reference, or create a new one if it doesn't exist yet
     let thread_at_generation =
         if let Some(thread) = callstack.get_thread_with_index(original_thread_index) {
             Cow::Borrowed(thread)
@@ -907,6 +932,7 @@ fn value_to_choice<'story>(
     })
 }
 
+/// Serialize thread state
 fn choice_to_value(choice: &Choice, story: &Story) -> serde_json::Value {
     json!({
         "text": story.resolve_str(choice.text).to_string(),
@@ -917,68 +943,83 @@ fn choice_to_value(choice: &Choice, story: &Story) -> serde_json::Value {
     })
 }
 
-// Helpers
+//////// Helpers ////////
+
+/// Get the value of a key or return error.
 fn require<'a>(value: &'a serde_json::Value, key: &str) -> Fallible<&'a serde_json::Value> {
     value
         .get(key)
         .ok_or_else(|| InvalidJsonFormat(format!("missing '{}'", key)).into())
 }
 
+/// Get the number value of a key if it exists.
 fn get_i64(value: &serde_json::Value, key: &str) -> Option<i64> {
     value.get(key).and_then(|v| v.as_i64())
 }
 
+/// Convert a value into a number or return error.
 fn into_i64(value: &serde_json::Value) -> Fallible<i64> {
     value
         .as_i64()
         .ok_or_else(|| InvalidJsonFormat(format!("expected integer value, got '{}'", value)).into())
 }
 
+/// Convert a value into a number or return error.
 fn into_i32(value: &serde_json::Value) -> Fallible<i32> {
     Ok(into_i64(value)? as i32)
 }
 
+/// Get the number value of a key if it exists.
 fn get_u64(value: &serde_json::Value, key: &str) -> Option<u64> {
     value.get(key).and_then(|v| v.as_u64())
 }
 
+/// Get the number value of a key or return error.
 fn require_u64(value: &serde_json::Value, key: &str) -> Fallible<u64> {
     get_u64(value, key).ok_or_else(|| {
         InvalidJsonFormat(format!("expected unsigned integer value for '{}'", key)).into()
     })
 }
 
+/// Convert a value into a number or return error.
 fn into_u64(value: &serde_json::Value) -> Fallible<u64> {
     value.as_u64().ok_or_else(|| {
         InvalidJsonFormat(format!("expected unsigned integer value, got '{}'", value)).into()
     })
 }
 
+/// Get the number value of a key if it exists.
 fn get_u32(value: &serde_json::Value, key: &str) -> Option<u32> {
     get_u64(value, key).map(|v| v as u32)
 }
 
+/// Get the number value of a key or return error.
 fn require_u32(value: &serde_json::Value, key: &str) -> Fallible<u32> {
     Ok(require_u64(value, key)? as u32)
 }
 
+/// Convert a value into a number or return error.
 fn into_u32(value: &serde_json::Value) -> Fallible<u32> {
     Ok(into_u64(value)? as u32)
 }
 
+/// Get the string value of a key if it exists.
 fn get_str<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(|v| v.as_str())
 }
 
+/// Get the string value of a key or return error.
 fn require_str<'a>(value: &'a serde_json::Value, key: &str) -> Fallible<&'a str> {
     get_str(value, key)
         .ok_or_else(|| InvalidJsonFormat(format!("expected string value for '{}'", key)).into())
 }
 
+/// Get the `Path` value of a key if it exists.
 fn get_path(value: &serde_json::Value, key: &str, string_arena: &mut StringArena) -> Option<Path> {
     get_str(value, key).map(|s| Path::from_str(s, string_arena))
 }
 
+/// Get the `Path` value of a key or return error.
 fn require_path(
     value: &serde_json::Value,
     key: &str,
@@ -989,6 +1030,7 @@ fn require_path(
     })
 }
 
+/// Get the value of a key as a map if it exists.
 fn get_object<'a>(
     value: &'a serde_json::Value,
     key: &str,
@@ -996,6 +1038,7 @@ fn get_object<'a>(
     value.get(key).and_then(|v| v.as_object())
 }
 
+/// Get the value of a key as a map or return error.
 fn require_object<'a>(
     value: &'a serde_json::Value,
     key: &str,
@@ -1004,16 +1047,19 @@ fn require_object<'a>(
         .ok_or_else(|| InvalidJsonFormat(format!("expected object value for '{}'", key)).into())
 }
 
+/// Convert a value into a map or return error.
 fn into_object(value: &serde_json::Value) -> Fallible<&serde_json::Map<String, serde_json::Value>> {
     value
         .as_object()
         .ok_or_else(|| InvalidJsonFormat(format!("expected object value, got '{}'", value)).into())
 }
 
+/// Get the value of a key as an array if it exists.
 fn get_array<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a Vec<serde_json::Value>> {
     value.get(key).and_then(|v| v.as_array())
 }
 
+/// Get the value of a key as an array or return error.
 fn require_array<'a>(
     value: &'a serde_json::Value,
     key: &str,
@@ -1022,16 +1068,19 @@ fn require_array<'a>(
         .ok_or_else(|| InvalidJsonFormat(format!("expected array value for '{}'", key)).into())
 }
 
+/// Convert a value into an array or return error.
 fn into_array(value: &serde_json::Value) -> Fallible<&Vec<serde_json::Value>> {
     value
         .as_array()
         .ok_or_else(|| InvalidJsonFormat(format!("expected array value, got '{}'", value)).into())
 }
 
+/// Get the boolean value of a key if it exists.
 fn get_bool(value: &serde_json::Value, key: &str) -> Option<bool> {
     value.get(key).and_then(|v| v.as_bool())
 }
 
+/// Get the boolean value of a key or return error.
 fn require_bool(value: &serde_json::Value, key: &str) -> Fallible<bool> {
     get_bool(value, key)
         .ok_or_else(|| InvalidJsonFormat(format!("expected boolean value for '{}'", key)).into())
