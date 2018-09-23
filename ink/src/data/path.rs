@@ -182,6 +182,15 @@ impl Path {
         Self::push_element(&mut self.components, component);
     }
 
+    pub fn push_first(&mut self, component: PathComponent) {
+        let mut comps = Vec::with_capacity(self.len() + 1);
+        Self::push_element(&mut comps, component);
+        for comp in &self.components {
+            Self::push_element(&mut comps, *comp);
+        }
+        self.components = comps;
+    }
+
     pub fn with_tail(&self, tail: &[PathComponent]) -> Self {
         let mut path = self.clone();
         path.components.reserve(tail.len());

@@ -3,10 +3,10 @@ use super::super::{
     Thread, VariablesState,
 };
 use super::{
-    ChoiceFlags, ChoicePoint, Container, ContainerNode, ControlCommand, CountFlags, Divert,
+    ChoiceFlags, ChoicePoint, ContainedNode, Container, ControlCommand, CountFlags, Divert,
     DivertTarget,
     Error::*,
-    List, ListDefinition, ListDefinitionsMap, ListItem, NativeFunction,
+    List, ListDefinition, ListDefinitionsMap, ListItem, NativeFunction, Node,
     Object::{self, *},
     Path, PushPopType, Story, Value, VariableAssignment, VariableReference, VariableScope,
 };
@@ -14,7 +14,7 @@ use failure::{bail, ensure, Fallible};
 use lazy_static::lazy_static;
 use log::{trace, warn};
 use serde_json::json;
-use std::{borrow::Cow, cell::RefCell, collections::HashMap};
+use std::{cell::RefCell, collections::HashMap, ptr, rc::Rc};
 
 /// Current version of compiled ink JSON the runtime writes
 const CURRENT_FORMAT_VERSION: u64 = 19;
@@ -29,95 +29,97 @@ const MIN_SAVE_STATE_VERSION: u64 = 8;
 // TODO Replace lazy static maps with phf crate someday?
 lazy_static! {
     /// List of simple enum values and their string serialization
-    static ref OBJECT_MAP_TUPLES: &'static [(Object, &'static str)] = &[
-        (Void, "void"),
-        (Glue, "<>"),
+    static ref CONTROL_COMMAND_MAP_TUPLES: &'static [(ControlCommand, &'static str)] = &[
         // Control commands
-        (Control(ControlCommand::EvalStart), "ev"),
-        (Control(ControlCommand::EvalOutput), "out"),
-        (Control(ControlCommand::EvalEnd), "/ev"),
-        (Control(ControlCommand::Duplicate), "du"),
-        (Control(ControlCommand::PopEvaluatedValue), "pop"),
-        (Control(ControlCommand::PopFunction), "~ret"),
-        (Control(ControlCommand::PopTunnel), "->->"),
-        (Control(ControlCommand::BeginString), "str"),
-        (Control(ControlCommand::EndString), "/str"),
-        (Control(ControlCommand::NoOp), "nop"),
-        (Control(ControlCommand::ChoiceCount), "choiceCnt"),
-        (Control(ControlCommand::Turns), "turn"),
-        (Control(ControlCommand::TurnsSince), "turns"),
-        (Control(ControlCommand::ReadCount), "readc"),
-        (Control(ControlCommand::Random), "rnd"),
-        (Control(ControlCommand::SeedRandom), "srnd"),
-        (Control(ControlCommand::VisitIndex), "visit"),
-        (Control(ControlCommand::SequenceShuffleIndex), "seq"),
-        (Control(ControlCommand::StartThread), "thread"),
-        (Control(ControlCommand::Done), "done"),
-        (Control(ControlCommand::End), "end"),
-        (Control(ControlCommand::ListFromInt), "listInt"),
-        (Control(ControlCommand::ListRange), "range"),
-        (Control(ControlCommand::ListRandom), "lrnd"),
+        (ControlCommand::EvalStart, "ev"),
+        (ControlCommand::EvalOutput, "out"),
+        (ControlCommand::EvalEnd, "/ev"),
+        (ControlCommand::Duplicate, "du"),
+        (ControlCommand::PopEvaluatedValue, "pop"),
+        (ControlCommand::PopFunction, "~ret"),
+        (ControlCommand::PopTunnel, "->->"),
+        (ControlCommand::BeginString, "str"),
+        (ControlCommand::EndString, "/str"),
+        (ControlCommand::NoOp, "nop"),
+        (ControlCommand::ChoiceCount, "choiceCnt"),
+        (ControlCommand::Turns, "turn"),
+        (ControlCommand::TurnsSince, "turns"),
+        (ControlCommand::ReadCount, "readc"),
+        (ControlCommand::Random, "rnd"),
+        (ControlCommand::SeedRandom, "srnd"),
+        (ControlCommand::VisitIndex, "visit"),
+        (ControlCommand::SequenceShuffleIndex, "seq"),
+        (ControlCommand::StartThread, "thread"),
+        (ControlCommand::Done, "done"),
+        (ControlCommand::End, "end"),
+        (ControlCommand::ListFromInt, "listInt"),
+        (ControlCommand::ListRange, "range"),
+        (ControlCommand::ListRandom, "lrnd"),
+    ];
+    static ref NATIVE_FUNCTION_MAP_TUPLES: &'static [(NativeFunction, &'static str)] = &[
         // Native Functions
-        (NativeCall(NativeFunction::Add), "+"),
-        (NativeCall(NativeFunction::Subtract), "-"),
-        (NativeCall(NativeFunction::Divide), "/"),
-        (NativeCall(NativeFunction::Multiply), "*"),
-        (NativeCall(NativeFunction::Modulo), "%"),
-        (NativeCall(NativeFunction::Negate), "_"),
-        (NativeCall(NativeFunction::Equal), "=="),
-        (NativeCall(NativeFunction::Greater), ">"),
-        (NativeCall(NativeFunction::Less), "<"),
-        (NativeCall(NativeFunction::GreaterOrEqual), ">="),
-        (NativeCall(NativeFunction::LessOrEqual), "<="),
-        (NativeCall(NativeFunction::NotEqual), "!="),
-        (NativeCall(NativeFunction::Not), "!"),
-        (NativeCall(NativeFunction::And), "&&"),
-        (NativeCall(NativeFunction::Or), "||"),
-        (NativeCall(NativeFunction::Min), "MIN"),
-        (NativeCall(NativeFunction::Max), "MAX"),
-        (NativeCall(NativeFunction::Power), "POW"),
-        (NativeCall(NativeFunction::Floor), "FLOOR"),
-        (NativeCall(NativeFunction::Ceiling), "CEILING"),
-        (NativeCall(NativeFunction::Int), "INT"),
-        (NativeCall(NativeFunction::Float), "FLOAT"),
-        (NativeCall(NativeFunction::Has), "?"),
-        (NativeCall(NativeFunction::HasNot), "!?"),
-        (NativeCall(NativeFunction::Intersect), "L^"),
-        (NativeCall(NativeFunction::ListMin), "LIST_MIN"),
-        (NativeCall(NativeFunction::ListMax), "LIST_MAX"),
-        (NativeCall(NativeFunction::All), "LIST_ALL"),
-        (NativeCall(NativeFunction::Count), "LIST_COUNT"),
-        (NativeCall(NativeFunction::ValueOfList), "LIST_VALUE"),
-        (NativeCall(NativeFunction::Invert), "LIST_INVERT"),
+        (NativeFunction::Add, "+"),
+        (NativeFunction::Subtract, "-"),
+        (NativeFunction::Divide, "/"),
+        (NativeFunction::Multiply, "*"),
+        (NativeFunction::Modulo, "%"),
+        (NativeFunction::Negate, "_"),
+        (NativeFunction::Equal, "=="),
+        (NativeFunction::Greater, ">"),
+        (NativeFunction::Less, "<"),
+        (NativeFunction::GreaterOrEqual, ">="),
+        (NativeFunction::LessOrEqual, "<="),
+        (NativeFunction::NotEqual, "!="),
+        (NativeFunction::Not, "!"),
+        (NativeFunction::And, "&&"),
+        (NativeFunction::Or, "||"),
+        (NativeFunction::Min, "MIN"),
+        (NativeFunction::Max, "MAX"),
+        (NativeFunction::Power, "POW"),
+        (NativeFunction::Floor, "FLOOR"),
+        (NativeFunction::Ceiling, "CEILING"),
+        (NativeFunction::Int, "INT"),
+        (NativeFunction::Float, "FLOAT"),
+        (NativeFunction::Has, "?"),
+        (NativeFunction::HasNot, "!?"),
+        (NativeFunction::Intersect, "L^"),
+        (NativeFunction::ListMin, "LIST_MIN"),
+        (NativeFunction::ListMax, "LIST_MAX"),
+        (NativeFunction::All, "LIST_ALL"),
+        (NativeFunction::Count, "LIST_COUNT"),
+        (NativeFunction::ValueOfList, "LIST_VALUE"),
+        (NativeFunction::Invert, "LIST_INVERT"),
     ];
     /// Map of strings to simple enum values for deserialization
-    static ref STR_TO_OBJECT_MAP: HashMap<&'static str, Object> = {
-        let mut map = HashMap::with_capacity(OBJECT_MAP_TUPLES.len());
-        for pair in *OBJECT_MAP_TUPLES {
+    static ref STR_TO_CONTROL_COMMAND_MAP: HashMap<&'static str, ControlCommand> = {
+        let mut map = HashMap::with_capacity(CONTROL_COMMAND_MAP_TUPLES.len());
+        for pair in *CONTROL_COMMAND_MAP_TUPLES {
             map.insert(pair.1, pair.0.clone());
         }
         map
     };
     /// Map of control commands to strings for serialization
     static ref CONTROL_COMMAND_TO_STR_MAP: HashMap<ControlCommand, &'static str> = {
-        let mut map = HashMap::with_capacity(OBJECT_MAP_TUPLES.len());
-        for pair in *OBJECT_MAP_TUPLES {
-            if let Control(command) = pair.0 {
-                map.insert(command, pair.1);
-            }
+        let mut map = HashMap::with_capacity(CONTROL_COMMAND_MAP_TUPLES.len());
+        for pair in *CONTROL_COMMAND_MAP_TUPLES {
+            map.insert(pair.0, pair.1);
         }
-        map.shrink_to_fit();
+        map
+    };
+    /// Map of strings to simple enum values for deserialization
+    static ref STR_TO_NATIVE_FUNCTION_MAP: HashMap<&'static str, NativeFunction> = {
+        let mut map = HashMap::with_capacity(NATIVE_FUNCTION_MAP_TUPLES.len());
+        for pair in *NATIVE_FUNCTION_MAP_TUPLES {
+            map.insert(pair.1, pair.0.clone());
+        }
         map
     };
     /// Map of control commands to strings for serialization
     static ref NATIVE_FUNCTION_TO_STR_MAP: HashMap<NativeFunction, &'static str> = {
-        let mut map = HashMap::with_capacity(OBJECT_MAP_TUPLES.len());
-        for pair in *OBJECT_MAP_TUPLES {
-            if let NativeCall(func) = pair.0 {
-                map.insert(func, pair.1);
-            }
+        let mut map = HashMap::with_capacity(NATIVE_FUNCTION_MAP_TUPLES.len());
+        for pair in *NATIVE_FUNCTION_MAP_TUPLES {
+            map.insert(pair.0, pair.1);
         }
-        map.shrink_to_fit();
         map
     };
 }
@@ -142,11 +144,11 @@ pub(crate) fn value_to_story(value: &serde_json::Value) -> Fallible<Story> {
     let mut string_arena = StringArena::new();
 
     // Deserialize root container and list definitions
-    let root = Object::Container(value_to_container(
+    let root = box_object(Object::Container(value_to_container(
         require(value, "root")?,
         None,
         &mut string_arena,
-    )?);
+    )?));
     let list_definitions = value
         .get("listDefs")
         .map(|v| value_to_list_definitions(v, &mut string_arena))
@@ -321,6 +323,17 @@ pub(crate) fn story_state_to_value(state: &StoryState) -> serde_json::Value {
     value
 }
 
+/// Box an Object, ensuring parent hierarchy is updated
+fn box_object(object: Object) -> Box<Object> {
+    let mut boxed = Box::new(object);
+    // Set parents of container children
+    if let Object::Container(cref) = &mut *boxed {
+        // Note that parent points directly to Container, not Object
+        cref.set_child_parents(cref as *const Container);
+    }
+    boxed
+}
+
 /// Deserialize a `Container`
 fn value_to_container(
     value: &serde_json::Value,
@@ -332,28 +345,23 @@ fn value_to_container(
         Ok(Container::default())
     } else {
         // Deserialize all unnamed contents, skipping the special last array element
-        let mut content = Vec::with_capacity(array.len() - 1);
+        let mut children = Vec::with_capacity(array.len() - 1);
         for value in &array[..array.len() - 1] {
-            content.push(ContainerNode::new(value_to_ink_object(
-                value,
-                None,
-                string_arena,
-            )?));
+            children.push(box_object(value_to_ink_object(value, None, string_arena)?));
         }
 
         // The last container element has the named contents, as well as special container fields
         let maybe_last = &array[array.len() - 1].as_object();
-        let mut named_only_content =
-            HashMap::with_capacity(maybe_last.map_or(0, |last| last.len()));
+        let mut named_children = HashMap::with_capacity(maybe_last.map_or(0, |last| last.len()));
         if let Some(last) = maybe_last {
             for (key, value) in last.iter() {
                 if key == "#n" || key == "#f" {
                     continue;
                 }
                 let key = string_arena.get_or_intern(&key[..]);
-                named_only_content.insert(
+                named_children.insert(
                     key,
-                    ContainerNode::new(value_to_ink_object(value, Some(key), string_arena)?),
+                    box_object(value_to_ink_object(value, Some(key), string_arena)?),
                 );
             }
         }
@@ -364,6 +372,7 @@ fn value_to_container(
             maybe_last
                 .and_then(|last| last.get("#n"))
                 .and_then(|v| v.as_str())
+                .filter(|v| !v.is_empty())
                 .map(|v| string_arena.get_or_intern(v))
         });
         let count_flags = maybe_last
@@ -373,10 +382,11 @@ fn value_to_container(
             .and_then(CountFlags::from_bits)
             .unwrap_or_else(CountFlags::default);
         Ok(Container {
+            node: Node::new(),
             name,
             count_flags,
-            content,
-            named_only_content,
+            children,
+            named_children,
         })
     }
 }
@@ -389,23 +399,23 @@ fn container_to_value(
 ) -> serde_json::Value {
     // Serialize all unnamed content first as array
     let mut array: Vec<_> = container
-        .content
+        .children
         .iter()
-        .map(|v| ink_object_to_value(&v.object, story))
+        .map(|v| ink_object_to_value(&*v, story))
         .collect();
 
     // Only serialize final named only contents if needed, otherwise a null
-    if !container.named_only_content.is_empty()
+    if !container.named_children.is_empty()
         || (serialize_name && container.name.is_some())
         || !container.count_flags.is_empty()
     {
         let mut last: serde_json::Map<_, _> = container
-            .named_only_content
+            .named_children
             .iter()
             .map(|(key, content)| {
                 (
                     story.resolve_str(*key).to_string(),
-                    ink_object_to_value(&content.object, story),
+                    ink_object_to_value(&*content, story),
                 )
             }).collect();
 
@@ -439,7 +449,7 @@ fn json_object_to_ink_object(
     Ok(
         // DivertTarget
         if let Some(path) = get_path(value, "^->", string_arena) {
-            Value(Value::DivertTarget(path))
+            Value(Value::DivertTarget(path, Node::new()))
         }
         // VariablePointer
         else if let Some(var) = get_str(value, "^var") {
@@ -451,6 +461,7 @@ fn json_object_to_ink_object(
             Value(Value::VariablePointer(
                 string_arena.get_or_intern(var),
                 scope,
+                Node::new(),
             ))
         }
         // Divert
@@ -478,6 +489,7 @@ fn json_object_to_ink_object(
                 DivertTarget::Path(Path::from_str(target_str, string_arena))
             };
             Divert(Divert {
+                node: Node::new(),
                 target,
                 pushes_to_stack,
                 stack_push_type,
@@ -492,21 +504,26 @@ fn json_object_to_ink_object(
                 .and_then(ChoiceFlags::from_bits)
                 .unwrap_or_default();
             Choice(ChoicePoint {
+                node: Node::new(),
                 path_on_choice,
                 flags,
             })
         }
         // Variable References
         else if let Some(name) = get_str(value, "VAR?") {
-            Variable(VariableReference::Name(string_arena.get_or_intern(name)))
+            Variable(VariableReference::Name(
+                string_arena.get_or_intern(name),
+                Node::new(),
+            ))
         } else if let Some(path) = get_path(value, "CNT?", string_arena) {
-            Variable(VariableReference::Count(path))
+            Variable(VariableReference::Count(path, Node::new()))
         }
         // Variable assignment
         else if let Some(name) = get_str(value, "VAR=").or_else(|| get_str(value, "temp=")) {
             let global = value.get("VAR=").is_some();
             let new_declaration = value.get("re").is_none();
             Assignment(VariableAssignment {
+                node: Node::new(),
                 name: string_arena.get_or_intern(name),
                 new_declaration,
                 global,
@@ -514,7 +531,7 @@ fn json_object_to_ink_object(
         }
         // Tag
         else if let Some(text) = get_str(value, "#") {
-            Tag(string_arena.get_or_intern(text))
+            Tag(string_arena.get_or_intern(text), Node::new())
         }
         // List
         else if let Some(map) = get_object(value, "list") {
@@ -534,6 +551,7 @@ fn json_object_to_ink_object(
                     )
                 }).collect();
             Value(Value::List(List {
+                node: Node::new(),
                 content,
                 origin_names,
             }))
@@ -556,22 +574,34 @@ fn value_to_ink_object(
     Ok(match value {
         Number(n) => Value(
             n.as_i64()
-                .map(|i| Value::Int(i as i32))
-                .or_else(|| n.as_f64().map(|f| Value::Float(f as f32)))
+                .map(|i| Value::Int(i as i32, Node::new()))
+                .or_else(|| n.as_f64().map(|f| Value::Float(f as f32, Node::new())))
                 .ok_or_else(|| InvalidJsonFormat(format!("invalid number value '{}'", value)))?,
         ),
         Array(_) => Container(value_to_container(value, name, string_arena)?),
         Object(_) => json_object_to_ink_object(value, string_arena)?,
 
-        // Control commands, Native Functions, Void, and Glue
-        String(s) => if let Some(obj) = STR_TO_OBJECT_MAP.get(&s[..]) {
-            obj.clone()
+        // Control commands
+        String(s) => if let Some(obj) = STR_TO_CONTROL_COMMAND_MAP.get(&s[..]) {
+            Control(obj.clone(), Node::new())
+        // Native functions
+        } else if let Some(obj) = STR_TO_NATIVE_FUNCTION_MAP.get(&s[..]) {
+            NativeCall(obj.clone(), Node::new())
+        // Void
+        } else if s == "void" {
+            Void(Node::new())
+        // Glue
+        } else if s == "<>" {
+            Glue(Node::new())
         // Standalone newline
         } else if s == "\n" {
-            Value(Value::String(string_arena.get_or_intern("\n")))
+            Value(Value::String(string_arena.get_or_intern("\n"), Node::new()))
         // Regular string values
         } else if s.starts_with('^') {
-            Value(Value::String(string_arena.get_or_intern(&s[1..])))
+            Value(Value::String(
+                string_arena.get_or_intern(&s[1..]),
+                Node::new(),
+            ))
         // Unrecognized strings
         } else {
             bail!(InvalidJsonFormat(format!(
@@ -588,9 +618,9 @@ fn value_to_ink_object(
 fn ink_object_to_value(obj: &Object, story: &Story) -> serde_json::Value {
     match obj {
         // Simple stuff
-        Glue => json!("<>"),
-        Void => json!("void"),
-        Tag(text) => json!({ "#": story.resolve_str(*text).to_string() }),
+        Glue(_) => json!("<>"),
+        Void(_) => json!("void"),
+        Tag(text, _) => json!({ "#": story.resolve_str(*text).to_string() }),
         Choice(choice) => {
             json!({"*": story.path_to_string(&choice.path_on_choice), "flg": choice.flags.bits()})
         }
@@ -599,10 +629,10 @@ fn ink_object_to_value(obj: &Object, story: &Story) -> serde_json::Value {
         Container(container) => container_to_value(container, story, false),
 
         // Variables
-        Variable(VariableReference::Name(name)) => {
+        Variable(VariableReference::Name(name, _)) => {
             json!({ "VAR?": story.resolve_str(*name).to_string() })
         }
-        Variable(VariableReference::Count(path)) => json!({"CNT?": story.path_to_string(path)}),
+        Variable(VariableReference::Count(path, _)) => json!({"CNT?": story.path_to_string(path)}),
         // Variable assignment
         Assignment(var_assign) => {
             let mut value = json!({
@@ -655,12 +685,12 @@ fn ink_object_to_value(obj: &Object, story: &Story) -> serde_json::Value {
         }
 
         // Values
-        Value(Value::Int(n)) => json!(n),
-        Value(Value::Float(n)) => json!(n),
-        Value(Value::String(s)) if &story.resolve_str(*s)[..] == "\n" => json!("\n"),
-        Value(Value::String(s)) => json!(format!("^{}", story.resolve_str(*s))),
-        Value(Value::DivertTarget(path)) => json!({"^->": story.path_to_string(path)}),
-        Value(Value::VariablePointer(name, scope)) => json!({
+        Value(Value::Int(n, _)) => json!(n),
+        Value(Value::Float(n, _)) => json!(n),
+        Value(Value::String(s, _)) if &story.resolve_str(*s)[..] == "\n" => json!("\n"),
+        Value(Value::String(s, _)) => json!(format!("^{}", story.resolve_str(*s))),
+        Value(Value::DivertTarget(path, _)) => json!({"^->": story.path_to_string(path)}),
+        Value(Value::VariablePointer(name, scope, _)) => json!({
             "^var": story.resolve_str(*name).to_string(),
             "ci": match scope {
                 VariableScope::Unknown => -1,
@@ -687,9 +717,9 @@ fn ink_object_to_value(obj: &Object, story: &Story) -> serde_json::Value {
         }
 
         // Control commands
-        Control(command) => json!(CONTROL_COMMAND_TO_STR_MAP[command]),
+        Control(command, _) => json!(CONTROL_COMMAND_TO_STR_MAP[command]),
         // Native function calls
-        NativeCall(func) => json!(NATIVE_FUNCTION_TO_STR_MAP[func]),
+        NativeCall(func, _) => json!(NATIVE_FUNCTION_TO_STR_MAP[func]),
     }
 }
 
@@ -751,7 +781,7 @@ fn value_to_callstack<'story>(
     let thread_array = require_array(value, "threads")?;
     let mut threads = Vec::with_capacity(thread_array.len());
     for value in thread_array {
-        threads.push(value_to_thread(value, story)?);
+        threads.push(Rc::new(value_to_thread(value, story)?));
     }
 
     Ok(CallStack {
@@ -912,9 +942,9 @@ fn value_to_choice<'story>(
     // Search for an existing thread reference, or create a new one if it doesn't exist yet
     let thread_at_generation =
         if let Some(thread) = callstack.get_thread_with_index(original_thread_index) {
-            Cow::Borrowed(thread)
+            thread
         } else {
-            Cow::Owned(value_to_thread(
+            Rc::new(value_to_thread(
                 choice_threads
                     .and_then(|threads| threads.get(&original_thread_index.to_string()))
                     .ok_or_else(|| InvalidJsonFormat("expected choice thread object".into()))?,

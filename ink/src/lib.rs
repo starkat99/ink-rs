@@ -3,15 +3,15 @@
 use encoding_rs_io::DecodeReaderBytes;
 use failure::{Fail, Fallible};
 use std::{
-    borrow::Cow,
     collections::HashMap,
     fmt::Debug,
     io::{Read, Write},
+    rc::Rc,
 };
 
 mod data;
 
-use data::Path;
+use data::{ContainedNode, Path, PathComponent};
 pub use data::{Error, Story};
 
 pub(crate) type InternStr = string_interner::Sym;
@@ -41,7 +41,7 @@ pub(crate) struct Pointer<'story> {
 
 #[derive(Debug, Clone)]
 pub(crate) struct CallStack<'story> {
-    threads: Vec<Thread<'story>>,
+    threads: Vec<Rc<Thread<'story>>>,
     thread_counter: u32,
 }
 
@@ -67,7 +67,7 @@ pub(crate) struct Choice<'story> {
     source_path: Path,
     index: u32,
     original_thread_index: u32,
-    thread_at_generation: Cow<'story, Thread<'story>>,
+    thread_at_generation: Rc<Thread<'story>>,
 }
 
 #[derive(Debug, Clone)]
@@ -145,7 +145,11 @@ impl<'story> Pointer<'story> {
     }
 
     pub(crate) fn path(&self) -> Path {
-        unimplemented!()
+        let mut path = self.container.map(|c| c.path().clone()).unwrap_or_default();
+        if let Some(index) = self.index {
+            path.push(PathComponent::from_u32(index));
+        }
+        path
     }
 }
 
@@ -181,8 +185,11 @@ impl<'story> CallStack<'story> {
         }
     }
 
-    pub(crate) fn get_thread_with_index(&self, _index: u32) -> Option<&'story Thread<'story>> {
-        unimplemented!()
+    pub(crate) fn get_thread_with_index(&self, index: u32) -> Option<Rc<Thread<'story>>> {
+        self.threads
+            .iter()
+            .find(|thread| thread.index == index)
+            .map(|t| t.clone())
     }
 }
 
