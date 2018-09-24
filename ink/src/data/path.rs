@@ -15,17 +15,17 @@ pub(crate) struct Path {
 }
 
 impl Path {
-    fn push_element(components: &mut Vec<PathComponent>, comp: PathComponent) {
-        if comp.is_parent() {
-            // Normalize any parents
-            match components.last() {
-                Some(PathComponent::Index(_)) | Some(PathComponent::Name(_)) => {
-                    components.pop();
-                }
-                _ => components.push(comp),
+    fn normalize(&mut self) {
+        let mut i = 1; // Skip first component, it has no predecessor
+        while i < self.components.len() {
+            // Check for a parent component with a non-parent predecessor
+            if self.components[i].is_parent() && !self.components[i - 1].is_parent() {
+                // Collapse the parent by removing both it and predecessor
+                self.components.drain(i - 1..i + 1);
+            } else {
+                // Only advance if we didn't remove anything
+                i += 1;
             }
-        } else {
-            components.push(comp)
         }
     }
 
@@ -38,35 +38,32 @@ impl Path {
 
     pub fn from_str(path: &str, string_arena: &mut StringArena) -> Self {
         let relative = path.starts_with('.');
-        let mut components: Vec<PathComponent> = Vec::new();
-        for comp in path
+        let components = path
             .split('.')
             .filter_map(|s| PathComponent::from_str(s, string_arena))
-        {
-            Self::push_element(&mut components, comp);
-        }
-        Path {
+            .collect();
+        let mut path = Path {
             components,
             relative,
-        }
+        };
+        path.normalize();
+        path
     }
 
     pub fn from_components(components: &[PathComponent], relative: bool) -> Self {
-        let mut comps = Vec::with_capacity(components.len());
-        for comp in components {
-            Self::push_element(&mut comps, *comp);
-        }
-        Path {
-            components: comps,
+        let components = components.to_owned();
+        let mut path = Path {
+            components,
             relative,
-        }
+        };
+        path.normalize();
+        path
     }
 
     pub fn from_component(component: PathComponent, relative: bool) -> Self {
-        let mut comps = Vec::with_capacity(1);
-        Self::push_element(&mut comps, component);
+        let components = vec![component];
         Path {
-            components: comps,
+            components,
             relative,
         }
     }
@@ -179,84 +176,83 @@ impl Path {
     }
 
     pub fn push(&mut self, component: PathComponent) {
-        Self::push_element(&mut self.components, component);
+        if component.is_parent() {
+            // Keep normalized
+            match self.components.last() {
+                Some(PathComponent::Index(_)) | Some(PathComponent::Name(_)) => {
+                    self.components.pop();
+                }
+                _ => self.components.push(component),
+            }
+        } else {
+            self.components.push(component)
+        }
     }
 
     pub fn push_first(&mut self, component: PathComponent) {
-        let mut comps = Vec::with_capacity(self.len() + 1);
-        Self::push_element(&mut comps, component);
-        for comp in &self.components {
-            Self::push_element(&mut comps, *comp);
+        if !component.is_parent() {
+            if let Some(PathComponent::Parent) = self.components.first() {
+                // Keep normalized
+                self.components.remove(0);
+            } else {
+                self.components.insert(0, component);
+            }
+        } else {
+            self.components.insert(0, component);
         }
-        self.components = comps;
     }
 
     pub fn with_tail(&self, tail: &[PathComponent]) -> Self {
         let mut path = self.clone();
-        path.components.reserve(tail.len());
         for comp in tail {
-            Self::push_element(&mut path.components, *comp);
+            path.push(*comp);
         }
         path
     }
 
     pub fn with_head(&self, head: &[PathComponent]) -> Self {
-        let mut comps = Vec::with_capacity(head.len() + self.len());
-        for comp in head {
-            Self::push_element(&mut comps, *comp);
-        }
-        for comp in &self.components {
-            Self::push_element(&mut comps, *comp);
-        }
-        Path {
-            components: comps,
+        let mut components = Vec::with_capacity(head.len() + self.len());
+        components.extend_from_slice(head);
+        components.extend_from_slice(&self.components);
+        let mut path = Path {
+            components,
             relative: self.relative,
-        }
+        };
+        path.normalize();
+        path
     }
 
     pub fn with_tail_component(&self, tail: PathComponent) -> Self {
         let mut path = self.clone();
-        Self::push_element(&mut path.components, tail);
+        path.push(tail);
         path
     }
 
     pub fn with_head_component(&self, head: PathComponent) -> Self {
-        let mut comps = Vec::with_capacity(self.len() + 1);
-        Self::push_element(&mut comps, head);
-        for comp in &self.components {
-            Self::push_element(&mut comps, *comp);
-        }
-        Path {
-            components: comps,
-            relative: self.relative,
-        }
+        let mut path = self.clone();
+        path.push_first(head);
+        path
     }
 
-    pub fn join(&mut self, path: Path) {
+    pub fn join(&mut self, path: &Path) {
         if path.relative {
             self.components.reserve(path.len());
-            self.extend(path.components);
+            for comp in &path.components {
+                self.push(*comp);
+            }
         } else {
-            self.components = path.components;
+            self.components = path.components.clone();
             self.relative = false;
         }
     }
 
-    pub fn with_joined(&self, path: Path) -> Self {
+    pub fn with_joined(&self, path: &Path) -> Self {
         if path.relative {
-            let mut comps = Vec::with_capacity(self.len() + path.len());
-            for comp in &self.components {
-                Self::push_element(&mut comps, *comp);
-            }
-            for comp in &path.components {
-                Self::push_element(&mut comps, *comp);
-            }
-            Path {
-                components: comps,
-                relative: self.relative,
-            }
+            let mut new_path = self.clone();
+            new_path.join(path);
+            new_path
         } else {
-            path
+            path.clone()
         }
     }
 
