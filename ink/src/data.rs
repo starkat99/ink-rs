@@ -8,7 +8,7 @@ use std::{
     cell::{Ref, RefCell},
     collections::HashMap,
     io::{Read, Write},
-    ptr,
+    ptr::{self, NonNull},
 };
 
 pub(crate) mod json;
@@ -29,6 +29,7 @@ pub enum Error {
 #[derive(Debug, Clone)]
 pub struct Story {
     root: Box<Object>, // Will always be container
+    root_container: NonNull<Container>,
     list_definitions: ListDefinitionsMap,
     // Would rather not have this interior mutability, but story state doesn't maintain a separate arena
     string_arena: RefCell<StringArena>,
@@ -56,24 +57,60 @@ pub(crate) struct Container {
     count_flags: CountFlags,
     children: Vec<Box<Object>>,
     named_children: HashMap<InternStr, Box<Object>>,
+    story: OnceCell<NonNull<Story>>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct Node {
     parent: *const Container,
+    object: *const Object,
     path: OnceCell<Path>,
 }
 
 pub(crate) trait ContainedNode {
     fn node(&self) -> &Node;
     fn node_mut(&mut self) -> &mut Node;
+    fn story(&self) -> &Story;
 
     fn parent(&self) -> Option<&Container> {
         self.node().parent()
     }
 
+    fn object(&self) -> &Object {
+        self.node().object()
+    }
+
     fn path(&self) -> &Path {
         self.node().path()
+    }
+
+    fn resolve_str(&self, s: InternStr) -> Ref<str> {
+        self.story().resolve_str(s)
+    }
+
+    fn path_to_string(&self, path: &Path) -> String {
+        self.story().path_to_string(path)
+    }
+
+    fn resolve_path<'story>(&'story self, path: &Path) -> SearchResult<'story, Object> {
+        if path.is_relative() {
+            match self.object() {
+                Object::Container(container) => container.find_content_at_path(path),
+                _ => {
+                    if let (Some(PathComponent::Parent), tail) = path.split_head() {
+                        self.parent()
+                            .expect("non-container object must have parent")
+                            .find_content_at_path(&tail)
+                    } else {
+                        // The first component of path MUST be a parent component if we're not a container
+                        error!("relative path {} cannot be resolved against a non-container object without a leading ^", self.path_to_string(path));
+                        SearchResult::Partial(self.object(), 0)
+                    }
+                }
+            }
+        } else {
+            self.story().resolve_absolute_path(path)
+        }
     }
 }
 
@@ -270,46 +307,14 @@ impl Story {
     }
 
     pub(crate) fn root(&self) -> &Container {
-        // Wish this wasn't necessary, but we need the Object wrapper around root
-        if let Object::Container(root) = &*self.root {
-            root
-        } else {
-            unreachable!()
-        }
+        unsafe { self.root_container.as_ref() }
     }
 
     pub(crate) fn resolve_absolute_path<'story>(
         &'story self,
         path: &Path,
     ) -> SearchResult<'story, Object> {
-        let mut current = &*self.root;
-        for (partial_index, comp) in path.iter().enumerate() {
-            if let Object::Container(container) = current {
-                match comp {
-                    PathComponent::Name(name) => {
-                        if let Some(node) = container.named_children.get(name) {
-                            current = &node;
-                        } else {
-                            // No child, so partial match with parent
-                            return SearchResult::Partial(current, partial_index);
-                        }
-                    }
-                    PathComponent::Index(index) => {
-                        if let Some(node) = container.children.get(*index as usize) {
-                            current = &node;
-                        } else {
-                            // No child, so partial match with parent
-                            return SearchResult::Partial(current, partial_index);
-                        }
-                    }
-                    PathComponent::Parent => {} // Ignore any parents, they'll all be at beginning of path
-                }
-            } else {
-                // Path expected more hierarchy, but we've hit a non-container
-                return SearchResult::Partial(current, partial_index);
-            }
-        }
-        SearchResult::Exact(current)
+        self.root().find_content_at_path(path)
     }
 
     pub(crate) fn get_pointer_at_path<'story>(&'story self, path: &Path) -> Pointer<'story> {
@@ -436,6 +441,16 @@ impl ContainedNode for Object {
             | Object::Void(node) => node,
         }
     }
+
+    fn story(&self) -> &Story {
+        match self {
+            Object::Container(c) => c.story(),
+            _ => self
+                .parent()
+                .expect("non-container must have parent")
+                .story(),
+        }
+    }
 }
 
 impl Container {
@@ -461,6 +476,47 @@ impl Container {
                     .map(|(&name, _)| PathComponent::Name(name))
             })
     }
+
+    pub(crate) fn find_content_at_path<'story>(
+        &'story self,
+        path: &Path,
+    ) -> SearchResult<'story, Object> {
+        let mut current = self.object();
+        for (partial_index, comp) in path.iter().enumerate() {
+            if let Object::Container(container) = current {
+                match comp {
+                    PathComponent::Name(name) => {
+                        if let Some(object) = container.named_children.get(name) {
+                            current = &object;
+                        } else {
+                            // No child, so partial match with parent
+                            return SearchResult::Partial(current, partial_index);
+                        }
+                    }
+                    PathComponent::Index(index) => {
+                        if let Some(object) = container.children.get(*index as usize) {
+                            current = &object;
+                        } else {
+                            // No child, so partial match with parent
+                            return SearchResult::Partial(current, partial_index);
+                        }
+                    }
+                    PathComponent::Parent => {
+                        if let Some(parent) = container.parent() {
+                            current = parent.object();
+                        } else {
+                            // No parent, so partial matach with self
+                            return SearchResult::Partial(current, partial_index);
+                        }
+                    }
+                }
+            } else {
+                // Path expected more hierarchy, but we've hit a non-container
+                return SearchResult::Partial(current, partial_index);
+            }
+        }
+        SearchResult::Exact(current)
+    }
 }
 
 impl Default for Container {
@@ -471,6 +527,7 @@ impl Default for Container {
             count_flags: CountFlags::default(),
             children: Vec::default(),
             named_children: HashMap::default(),
+            story: OnceCell::new(),
         }
     }
 }
@@ -483,12 +540,27 @@ impl ContainedNode for Container {
     fn node_mut(&mut self) -> &mut Node {
         &mut self.node
     }
+
+    fn story(&self) -> &Story {
+        unsafe {
+            self.story
+                .get_or_init(|| {
+                    NonNull::new_unchecked(
+                        self.node()
+                            .parent()
+                            .expect("non-root container should have parent")
+                            .story() as *const Story as *mut Story,
+                    )
+                }).as_ref()
+        }
+    }
 }
 
 impl Node {
     fn new() -> Node {
         Node {
             parent: ptr::null(),
+            object: ptr::null(),
             path: OnceCell::new(),
         }
     }
@@ -499,6 +571,11 @@ impl Node {
         } else {
             None
         }
+    }
+
+    fn object(&self) -> &Object {
+        debug_assert!(self.object != ptr::null());
+        unsafe { &*self.object }
     }
 
     fn path(&self) -> &Path {
@@ -545,6 +622,12 @@ impl ContainedNode for Value {
             | Value::VariablePointer(_, _, node) => node,
         }
     }
+
+    fn story(&self) -> &Story {
+        self.parent()
+            .expect("non-container must have parent")
+            .story()
+    }
 }
 
 impl ContainedNode for List {
@@ -554,6 +637,12 @@ impl ContainedNode for List {
 
     fn node_mut(&mut self) -> &mut Node {
         &mut self.node
+    }
+
+    fn story(&self) -> &Story {
+        self.parent()
+            .expect("non-container must have parent")
+            .story()
     }
 }
 
@@ -573,6 +662,12 @@ impl ContainedNode for Divert {
     fn node_mut(&mut self) -> &mut Node {
         &mut self.node
     }
+
+    fn story(&self) -> &Story {
+        self.parent()
+            .expect("non-container must have parent")
+            .story()
+    }
 }
 
 impl ContainedNode for ChoicePoint {
@@ -582,6 +677,12 @@ impl ContainedNode for ChoicePoint {
 
     fn node_mut(&mut self) -> &mut Node {
         &mut self.node
+    }
+
+    fn story(&self) -> &Story {
+        self.parent()
+            .expect("non-container must have parent")
+            .story()
     }
 }
 
@@ -597,6 +698,12 @@ impl ContainedNode for VariableReference {
             VariableReference::Name(_, node) | VariableReference::Count(_, node) => node,
         }
     }
+
+    fn story(&self) -> &Story {
+        self.parent()
+            .expect("non-container must have parent")
+            .story()
+    }
 }
 
 impl ContainedNode for VariableAssignment {
@@ -606,6 +713,12 @@ impl ContainedNode for VariableAssignment {
 
     fn node_mut(&mut self) -> &mut Node {
         &mut self.node
+    }
+
+    fn story(&self) -> &Story {
+        self.parent()
+            .expect("non-container must have parent")
+            .story()
     }
 }
 

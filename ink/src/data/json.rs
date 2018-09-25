@@ -14,7 +14,7 @@ use failure::{bail, ensure, Fallible};
 use lazy_static::lazy_static;
 use log::{trace, warn};
 use serde_json::json;
-use std::{cell::RefCell, collections::HashMap, ptr, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, ptr::NonNull, rc::Rc};
 
 /// Current version of compiled ink JSON the runtime writes
 const CURRENT_FORMAT_VERSION: u64 = 19;
@@ -144,22 +144,37 @@ pub(crate) fn value_to_story(value: &serde_json::Value) -> Fallible<Story> {
     let mut string_arena = StringArena::new();
 
     // Deserialize root container and list definitions
-    let root = box_object(Object::Container(value_to_container(
+    let mut root = box_object(Object::Container(value_to_container(
         require(value, "root")?,
         None,
         &mut string_arena,
     )?));
+    // Get root pointer
+    let mut root_container = unsafe {
+        NonNull::new_unchecked(if let Object::Container(cref) = &mut *root {
+            cref as *mut Container
+        } else {
+            unreachable!()
+        })
+    };
     let list_definitions = value
         .get("listDefs")
         .map(|v| value_to_list_definitions(v, &mut string_arena))
         .unwrap_or_else(|| Ok(ListDefinitionsMap::default()))?;
 
     trace!("deserialized ink JSON file");
-    Ok(Story {
+    let mut story = Story {
         root,
+        root_container,
         list_definitions,
         string_arena: RefCell::new(string_arena),
-    })
+    };
+    // Set story pointer on root
+    unsafe { root_container.as_mut() }
+        .story
+        .set(unsafe { NonNull::new_unchecked(&mut story as *mut Story) })
+        .expect("root story pointer should not be set yet");
+    Ok(story)
 }
 
 /// Serialize a `Story` to a JSON value.
@@ -331,6 +346,8 @@ fn box_object(object: Object) -> Box<Object> {
         // Note that parent points directly to Container, not Object
         cref.set_child_parents(cref as *const Container);
     }
+    // Point node to object
+    boxed.node_mut().object = &*boxed as *const Object;
     boxed
 }
 
@@ -382,11 +399,11 @@ fn value_to_container(
             .and_then(CountFlags::from_bits)
             .unwrap_or_else(CountFlags::default);
         Ok(Container {
-            node: Node::new(),
             name,
             count_flags,
             children,
             named_children,
+            ..Container::default()
         })
     }
 }
