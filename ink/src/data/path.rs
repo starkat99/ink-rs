@@ -22,6 +22,8 @@ impl Path {
             if self.components[i].is_parent() && !self.components[i - 1].is_parent() {
                 // Collapse the parent by removing both it and predecessor
                 self.components.drain(i - 1..i + 1);
+                // Backtrack, in case our predecessor is now a parent component (a chain of parents)
+                i = 1.min(i - 1);
             } else {
                 // Only advance if we didn't remove anything
                 i += 1;
