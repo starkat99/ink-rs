@@ -87,7 +87,7 @@ impl<'story> StoryState<'story> {
             story,
             output_stream: Vec::default(),
             current_choices: Vec::default(),
-            callstack: CallStack::new(),
+            callstack: CallStack::new(story.root()),
             variables: VariablesState::new(),
             evaluation_stack: Vec::default(),
             diverted_pointer: Pointer::default(),
@@ -162,6 +162,23 @@ impl Default for Pointer<'_> {
     }
 }
 
+impl<'story> CallStack<'story> {
+    pub(crate) fn new(container: &'story data::Container) -> Self {
+        let threads = vec![Rc::new(Thread::new(container))];
+        CallStack {
+            threads,
+            thread_counter: 0,
+        }
+    }
+
+    pub(crate) fn get_thread_with_index(&self, index: u32) -> Option<Rc<Thread<'story>>> {
+        self.threads
+            .iter()
+            .find(|thread| thread.index == index)
+            .map(|t| t.clone())
+    }
+}
+
 impl<'story> CallStackElement<'story> {
     pub(crate) fn new(
         stack_type: data::PushPopType,
@@ -177,19 +194,27 @@ impl<'story> CallStackElement<'story> {
     }
 }
 
-impl<'story> CallStack<'story> {
-    pub(crate) fn new() -> Self {
-        CallStack {
-            threads: Vec::default(),
-            thread_counter: 0,
+impl<'story> Thread<'story> {
+    pub(crate) fn new(container: &'story data::Container) -> Self {
+        let callstack = vec![CallStackElement::new(
+            data::PushPopType::Tunnel,
+            Pointer::start_of(container),
+            false,
+        )];
+        Thread {
+            callstack,
+            ..Thread::default()
         }
     }
+}
 
-    pub(crate) fn get_thread_with_index(&self, index: u32) -> Option<Rc<Thread<'story>>> {
-        self.threads
-            .iter()
-            .find(|thread| thread.index == index)
-            .map(|t| t.clone())
+impl<'story> Default for Thread<'story> {
+    fn default() -> Self {
+        Thread {
+            callstack: Vec::default(),
+            index: 0,
+            previous_pointer: Pointer::default(),
+        }
     }
 }
 
