@@ -144,6 +144,16 @@ impl Path {
         }
     }
 
+    pub fn remove_head(&mut self) {
+        if !self.is_empty() {
+            self.components.remove(0);
+        }
+    }
+
+    pub fn remove_tail(&mut self) {
+        self.components.pop();
+    }
+
     pub fn as_slice(&self) -> &[PathComponent] {
         self.components.as_slice()
     }
@@ -370,18 +380,6 @@ impl PathComponent {
         }
     }
 
-    pub fn from_name(name: InternStr) -> PathComponent {
-        PathComponent::Name(name)
-    }
-
-    pub fn from_u32(i: u32) -> PathComponent {
-        PathComponent::Index(i)
-    }
-
-    pub fn parent() -> PathComponent {
-        PathComponent::Parent
-    }
-
     pub fn is_named(self) -> bool {
         if let PathComponent::Name(_) = self {
             true
@@ -393,6 +391,14 @@ impl PathComponent {
     pub fn as_name(self, string_arena: &StringArena) -> Option<&str> {
         if let PathComponent::Name(s) = self {
             string_arena.resolve(s)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn as_intern_name(self) -> Option<InternStr> {
+        if let PathComponent::Name(s) = self {
+            Some(s)
         } else {
             None
         }
@@ -429,13 +435,13 @@ impl PathComponent {
 
 impl From<u32> for PathComponent {
     fn from(from: u32) -> Self {
-        Self::from_u32(from)
+        PathComponent::Index(from)
     }
 }
 
 impl From<InternStr> for PathComponent {
     fn from(from: InternStr) -> Self {
-        Self::from_name(from)
+        PathComponent::Name(from)
     }
 }
 

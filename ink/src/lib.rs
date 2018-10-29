@@ -147,7 +147,7 @@ impl<'story> Pointer<'story> {
     pub(crate) fn path(&self) -> Path {
         let mut path = self.container.map(|c| c.path().clone()).unwrap_or_default();
         if let Some(index) = self.index {
-            path.push(PathComponent::from_u32(index));
+            path.push(PathComponent::Index(index));
         }
         path
     }

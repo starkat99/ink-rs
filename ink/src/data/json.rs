@@ -8,13 +8,14 @@ use super::{
     Error::*,
     List, ListDefinition, ListDefinitionsMap, ListItem, NativeFunction, Node,
     Object::{self, *},
-    Path, PushPopType, Story, Value, VariableAssignment, VariableReference, VariableScope,
+    Path, PathComponent, PushPopType, Story, Value, VariableAssignment, VariableReference,
+    VariableScope,
 };
 use failure::{bail, ensure, Fallible};
 use lazy_static::lazy_static;
 use log::{trace, warn};
 use serde_json::json;
-use std::{cell::RefCell, collections::HashMap, ptr::NonNull, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 /// Current version of compiled ink JSON the runtime writes
 const CURRENT_FORMAT_VERSION: u64 = 19;
@@ -142,38 +143,29 @@ pub(crate) fn value_to_story(value: &serde_json::Value) -> Fallible<Story> {
 
     // Create string arena
     let mut string_arena = StringArena::new();
+    let mut objects = HashMap::new();
 
     // Deserialize root container and list definitions
-    let mut root = box_object(Object::Container(value_to_container(
+    let root = Object::Container(value_to_container(
         require(value, "root")?,
         None,
+        Path::default(),
         &mut string_arena,
-    )?));
-    // Get root pointer
-    let mut root_container = unsafe {
-        NonNull::new_unchecked(if let Object::Container(cref) = &mut *root {
-            cref as *mut Container
-        } else {
-            unreachable!()
-        })
-    };
+        &mut objects,
+    )?);
+    objects.insert(Path::default(), root);
+
     let list_definitions = value
         .get("listDefs")
         .map(|v| value_to_list_definitions(v, &mut string_arena))
         .unwrap_or_else(|| Ok(ListDefinitionsMap::default()))?;
 
     trace!("deserialized ink JSON file");
-    let mut story = Story {
-        root,
-        root_container,
+    let story = Story {
+        objects,
         list_definitions,
         string_arena: RefCell::new(string_arena),
     };
-    // Set story pointer on root
-    unsafe { root_container.as_mut() }
-        .story
-        .set(unsafe { NonNull::new_unchecked(&mut story as *mut Story) })
-        .expect("root story pointer should not be set yet");
     Ok(story)
 }
 
@@ -217,7 +209,13 @@ pub(crate) fn value_to_story_state<'story>(
     for (name, value) in variables_obj {
         variables.insert(
             story.intern_str(&name[..]),
-            value_to_ink_object(value, None, &mut story.string_arena.borrow_mut())?,
+            value_to_ink_object(
+                value,
+                None,
+                Path::default(),
+                &mut story.string_arena.borrow_mut(),
+                &mut HashMap::new(),
+            )?,
         );
     }
 
@@ -227,7 +225,9 @@ pub(crate) fn value_to_story_state<'story>(
         evaluation_stack.push(value_to_ink_object(
             value,
             None,
+            Path::default(),
             &mut story.string_arena.borrow_mut(),
+            &mut HashMap::new(),
         )?);
     }
 
@@ -237,7 +237,9 @@ pub(crate) fn value_to_story_state<'story>(
         output_stream.push(value_to_ink_object(
             value,
             None,
+            Path::default(),
             &mut story.string_arena.borrow_mut(),
+            &mut HashMap::new(),
         )?);
     }
 
@@ -245,7 +247,8 @@ pub(crate) fn value_to_story_state<'story>(
         value,
         "currentDivertTarget",
         &mut story.string_arena.borrow_mut(),
-    ).map(|path| story.get_pointer_at_path(&path))
+    )
+    .map(|path| story.get_pointer_at_path(&path))
     .unwrap_or_default();
 
     let visits_obj = require_object(value, "visitCounts")?;
@@ -320,7 +323,8 @@ pub(crate) fn story_state_to_value(state: &StoryState) -> serde_json::Value {
                         thread_to_value(&c.thread_at_generation, state.story),
                     )
                 })
-        }).collect::<serde_json::Map<_, _>>();
+        })
+        .collect::<serde_json::Map<_, _>>();
     if !choice_threads.is_empty() {
         obj.insert("choiceThreads".into(), choice_threads.into());
     }
@@ -338,48 +342,54 @@ pub(crate) fn story_state_to_value(state: &StoryState) -> serde_json::Value {
     value
 }
 
-/// Box an Object, ensuring parent hierarchy is updated
-fn box_object(object: Object) -> Box<Object> {
-    let mut boxed = Box::new(object);
-    // Set parents of container children
-    if let Object::Container(cref) = &mut *boxed {
-        // Note that parent points directly to Container, not Object
-        cref.set_child_parents(cref as *const Container);
-    }
-    // Point node to object
-    boxed.node_mut().object = &*boxed as *const Object;
-    boxed
-}
-
 /// Deserialize a `Container`
 fn value_to_container(
     value: &serde_json::Value,
     name: Option<InternStr>,
+    path: Path,
     string_arena: &mut StringArena,
+    objects: &mut HashMap<Path, Object>,
 ) -> Fallible<Container> {
     let array = into_array(value)?;
     if array.is_empty() {
         Ok(Container::default())
     } else {
-        // Deserialize all unnamed contents, skipping the special last array element
-        let mut children = Vec::with_capacity(array.len() - 1);
-        for value in &array[..array.len() - 1] {
-            children.push(box_object(value_to_ink_object(value, None, string_arena)?));
+        // The last container element has the named contents, as well as special container fields
+        let num_index_children = (array.len() - 1) as u32;
+
+        // Deserialize all contents, skipping the special last array element
+        for (i, value) in array[..array.len() - 1].iter().enumerate() {
+            let comp = PathComponent::Index(i as u32);
+            let child_path = path.with_tail_component(comp);
+            let obj = value_to_ink_object(
+                value,
+                None,
+                path.with_tail_component(comp),
+                string_arena,
+                objects,
+            )?;
+            objects.insert(child_path, obj);
         }
 
-        // The last container element has the named contents, as well as special container fields
         let maybe_last = &array[array.len() - 1].as_object();
-        let mut named_children = HashMap::with_capacity(maybe_last.map_or(0, |last| last.len()));
+        let mut named_children = Vec::with_capacity(maybe_last.map_or(0, |last| last.len()));
         if let Some(last) = maybe_last {
             for (key, value) in last.iter() {
                 if key == "#n" || key == "#f" {
                     continue;
                 }
                 let key = string_arena.get_or_intern(&key[..]);
-                named_children.insert(
-                    key,
-                    box_object(value_to_ink_object(value, Some(key), string_arena)?),
-                );
+                let comp = PathComponent::Name(key);
+                let child_path = path.with_tail_component(comp);
+                let obj = value_to_ink_object(
+                    value,
+                    Some(key),
+                    path.with_tail_component(PathComponent::Name(key)),
+                    string_arena,
+                    objects,
+                )?;
+                objects.insert(child_path, obj);
+                named_children.push(comp);
             }
         }
 
@@ -399,9 +409,10 @@ fn value_to_container(
             .and_then(CountFlags::from_bits)
             .unwrap_or_else(CountFlags::default);
         Ok(Container {
+            node: Node::new(path),
             name,
             count_flags,
-            children,
+            num_index_children,
             named_children,
             ..Container::default()
         })
@@ -416,9 +427,8 @@ fn container_to_value(
 ) -> serde_json::Value {
     // Serialize all unnamed content first as array
     let mut array: Vec<_> = container
-        .children
-        .iter()
-        .map(|v| ink_object_to_value(&*v, story))
+        .iter_index_children(story)
+        .map(|v| ink_object_to_value(v, story))
         .collect();
 
     // Only serialize final named only contents if needed, otherwise a null
@@ -429,12 +439,20 @@ fn container_to_value(
         let mut last: serde_json::Map<_, _> = container
             .named_children
             .iter()
-            .map(|(key, content)| {
+            .map(|comp| {
                 (
-                    story.resolve_str(*key).to_string(),
-                    ink_object_to_value(&*content, story),
+                    story
+                        .resolve_str(comp.as_intern_name().unwrap())
+                        .to_string(),
+                    ink_object_to_value(
+                        story
+                            .get_object(&container.path().with_tail_component(*comp))
+                            .unwrap(),
+                        story,
+                    ),
                 )
-            }).collect();
+            })
+            .collect();
 
         // Add name and flags if needed
         if serialize_name {
@@ -460,13 +478,14 @@ fn container_to_value(
 /// Deserialize an ink object from a JSON map value
 fn json_object_to_ink_object(
     value: &serde_json::Value,
+    path: Path,
     string_arena: &mut StringArena,
 ) -> Fallible<Object> {
     // Not really an easy way to do this
     Ok(
         // DivertTarget
-        if let Some(path) = get_path(value, "^->", string_arena) {
-            Value(Value::DivertTarget(path, Node::new()))
+        if let Some(divert_path) = get_path(value, "^->", string_arena) {
+            Value(Value::DivertTarget(divert_path, Node::new(path)))
         }
         // VariablePointer
         else if let Some(var) = get_str(value, "^var") {
@@ -478,7 +497,7 @@ fn json_object_to_ink_object(
             Value(Value::VariablePointer(
                 string_arena.get_or_intern(var),
                 scope,
-                Node::new(),
+                Node::new(path),
             ))
         }
         // Divert
@@ -506,7 +525,7 @@ fn json_object_to_ink_object(
                 DivertTarget::Path(Path::from_str(target_str, string_arena))
             };
             Divert(Divert {
-                node: Node::new(),
+                node: Node::new(path),
                 target,
                 pushes_to_stack,
                 stack_push_type,
@@ -521,7 +540,7 @@ fn json_object_to_ink_object(
                 .and_then(ChoiceFlags::from_bits)
                 .unwrap_or_default();
             Choice(ChoicePoint {
-                node: Node::new(),
+                node: Node::new(path),
                 path_on_choice,
                 flags,
             })
@@ -530,17 +549,17 @@ fn json_object_to_ink_object(
         else if let Some(name) = get_str(value, "VAR?") {
             Variable(VariableReference::Name(
                 string_arena.get_or_intern(name),
-                Node::new(),
+                Node::new(path),
             ))
-        } else if let Some(path) = get_path(value, "CNT?", string_arena) {
-            Variable(VariableReference::Count(path, Node::new()))
+        } else if let Some(count_path) = get_path(value, "CNT?", string_arena) {
+            Variable(VariableReference::Count(count_path, Node::new(path)))
         }
         // Variable assignment
         else if let Some(name) = get_str(value, "VAR=").or_else(|| get_str(value, "temp=")) {
             let global = value.get("VAR=").is_some();
             let new_declaration = value.get("re").is_none();
             Assignment(VariableAssignment {
-                node: Node::new(),
+                node: Node::new(path),
                 name: string_arena.get_or_intern(name),
                 new_declaration,
                 global,
@@ -548,7 +567,7 @@ fn json_object_to_ink_object(
         }
         // Tag
         else if let Some(text) = get_str(value, "#") {
-            Tag(string_arena.get_or_intern(text), Node::new())
+            Tag(string_arena.get_or_intern(text), Node::new(path))
         }
         // List
         else if let Some(map) = get_object(value, "list") {
@@ -566,9 +585,10 @@ fn json_object_to_ink_object(
                         ListItem(string_arena.get_or_intern(&key[..])),
                         val.as_i64().unwrap_or(0) as i32,
                     )
-                }).collect();
+                })
+                .collect();
             Value(Value::List(List {
-                node: Node::new(),
+                node: Node::new(path),
                 content,
                 origin_names,
             }))
@@ -585,47 +605,60 @@ fn json_object_to_ink_object(
 fn value_to_ink_object(
     value: &serde_json::Value,
     name: Option<InternStr>,
+    path: Path,
     string_arena: &mut StringArena,
+    objects: &mut HashMap<Path, Object>,
 ) -> Fallible<Object> {
     use serde_json::Value::*;
     Ok(match value {
         Number(n) => Value(
             n.as_i64()
-                .map(|i| Value::Int(i as i32, Node::new()))
-                .or_else(|| n.as_f64().map(|f| Value::Float(f as f32, Node::new())))
+                .map(|i| Value::Int(i as i32, Node::new(path.clone())))
+                .or_else(|| n.as_f64().map(|f| Value::Float(f as f32, Node::new(path))))
                 .ok_or_else(|| InvalidJsonFormat(format!("invalid number value '{}'", value)))?,
         ),
-        Array(_) => Container(value_to_container(value, name, string_arena)?),
-        Object(_) => json_object_to_ink_object(value, string_arena)?,
+        Array(_) => Container(value_to_container(
+            value,
+            name,
+            path,
+            string_arena,
+            objects,
+        )?),
+        Object(_) => json_object_to_ink_object(value, path, string_arena)?,
 
         // Control commands
-        String(s) => if let Some(obj) = STR_TO_CONTROL_COMMAND_MAP.get(&s[..]) {
-            Control(obj.clone(), Node::new())
-        // Native functions
-        } else if let Some(obj) = STR_TO_NATIVE_FUNCTION_MAP.get(&s[..]) {
-            NativeCall(obj.clone(), Node::new())
-        // Void
-        } else if s == "void" {
-            Void(Node::new())
-        // Glue
-        } else if s == "<>" {
-            Glue(Node::new())
-        // Standalone newline
-        } else if s == "\n" {
-            Value(Value::String(string_arena.get_or_intern("\n"), Node::new()))
-        // Regular string values
-        } else if s.starts_with('^') {
-            Value(Value::String(
-                string_arena.get_or_intern(&s[1..]),
-                Node::new(),
-            ))
-        // Unrecognized strings
-        } else {
-            bail!(InvalidJsonFormat(format!(
-                "unrecognized string value '{}'",
-                s
-            )))
-        },
+        String(s) => {
+            if let Some(obj) = STR_TO_CONTROL_COMMAND_MAP.get(&s[..]) {
+                Control(obj.clone(), Node::new(path))
+            // Native functions
+            } else if let Some(obj) = STR_TO_NATIVE_FUNCTION_MAP.get(&s[..]) {
+                NativeCall(obj.clone(), Node::new(path))
+            // Void
+            } else if s == "void" {
+                Void(Node::new(path))
+            // Glue
+            } else if s == "<>" {
+                Glue(Node::new(path))
+            // Standalone newline
+            } else if s == "\n" {
+                Value(Value::String(
+                    string_arena.get_or_intern("\n"),
+                    Node::new(path),
+                ))
+            // Regular string values
+            } else if s.starts_with('^') {
+                Value(Value::String(
+                    string_arena.get_or_intern(&s[1..]),
+                    Node::new(path),
+                ))
+            // Unrecognized strings
+            } else {
+                bail!(InvalidJsonFormat(format!(
+                    "unrecognized string value '{}'",
+                    s
+                )))
+            }
+        }
         Bool(_) => bail!(InvalidJsonFormat("unexpected boolean value".into())),
         Null => bail!(InvalidJsonFormat("unexpected null value".into())),
     })
@@ -784,7 +817,8 @@ fn list_definitions_to_value(list_defs: &ListDefinitionsMap, story: &Story) -> s
                 .map(|(key, val)| (story.resolve_str(key.0).to_string(), val.clone().into()))
                 .collect();
             (story.resolve_str(*name).to_string(), items.into())
-        }).collect::<serde_json::Map<_, _>>()
+        })
+        .collect::<serde_json::Map<_, _>>()
         .into()
 }
 
@@ -826,7 +860,8 @@ fn value_to_thread<'story>(
         value,
         "previousContentObject",
         &mut story.string_arena.borrow_mut(),
-    ).map(|path| story.get_pointer_at_path(&path))
+    )
+    .map(|path| story.get_pointer_at_path(&path))
     .unwrap_or_default();
 
     let callstack_array = require_array(value, "callstack")?;
@@ -871,7 +906,8 @@ fn value_to_callstack_element<'story>(
             1 => Some(PushPopType::Function),
             2 => Some(PushPopType::FunctionEvaluation),
             _ => None,
-        }).ok_or_else(|| InvalidJsonFormat("missing callstack element type value".into()))?;
+        })
+        .ok_or_else(|| InvalidJsonFormat("missing callstack element type value".into()))?;
 
     let pointer = if let Some(path) = get_path(value, "cPath", &mut story.string_arena.borrow_mut())
     {
@@ -900,7 +936,13 @@ fn value_to_callstack_element<'story>(
     for (name, value) in temp_vars_obj {
         temp_vars.insert(
             story.intern_str(&name[..]),
-            value_to_ink_object(value, None, &mut story.string_arena.borrow_mut())?,
+            value_to_ink_object(
+                value,
+                None,
+                Path::default(),
+                &mut story.string_arena.borrow_mut(),
+                &mut HashMap::new(),
+            )?,
         );
     }
 
