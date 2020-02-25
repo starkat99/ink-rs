@@ -1,8 +1,7 @@
-#![feature(uniform_paths)]
+use anyhow::{bail, Result};
 use clap::{
     app_from_crate, crate_authors, crate_description, crate_name, crate_version, AppSettings, Arg,
 };
-use failure::{bail, Fallible};
 use ink::{Story, StoryState};
 use std::{
     ffi::{OsStr, OsString},
@@ -10,7 +9,7 @@ use std::{
     path::Path,
 };
 
-fn main() -> Fallible<()> {
+fn main() -> Result<()> {
     include_str!("../Cargo.toml"); // Force recompile when manifest is modified
 
     let args = app_from_crate!()
@@ -18,7 +17,8 @@ fn main() -> Fallible<()> {
             AppSettings::ArgRequiredElseHelp,
             AppSettings::DontCollapseArgsInUsage,
             AppSettings::UnifiedHelpMessage,
-        ]).arg(
+        ])
+        .arg(
             Arg::with_name("input")
                 .takes_value(true)
                 .required(true)
@@ -26,7 +26,8 @@ fn main() -> Fallible<()> {
                 .value_name("FILE")
                 .validator_os(validate_file_exists)
                 .help("The input ink file"),
-        ).arg(
+        )
+        .arg(
             Arg::with_name("output")
                 .short("o")
                 .long("output")
@@ -36,23 +37,27 @@ fn main() -> Fallible<()> {
                 .value_name("COMPILED-FILE")
                 .validator_os(validate_not_dir)
                 .help("Output compiled file"),
-        ).arg(
+        )
+        .arg(
             Arg::with_name("compile")
                 .short("c")
                 .long("compile")
                 .help("Validate and compile the input file then exit; does not play file"),
-        ).arg(
+        )
+        .arg(
             Arg::with_name("verbose")
                 .short("v")
                 .long("verbose")
                 .help("Enable verbose diagnostic messages"),
-        ).arg(
+        )
+        .arg(
             Arg::with_name("quiet")
                 .short("q")
                 .long("quiet")
                 .conflicts_with("verbose")
                 .help("Disable all diagnostic messages except errors"),
-        ).get_matches();
+        )
+        .get_matches();
 
     // Initialize logging
     if args.is_present("verbose") {

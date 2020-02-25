@@ -1,17 +1,16 @@
-use super::super::{
-    CallStack, CallStackElement, Choice, InternStr, Pointer, SearchResult, StoryState, StringArena,
-    Thread, VariablesState,
-};
 use super::{
     ChoiceFlags, ChoicePoint, ContainedNode, Container, ControlCommand, CountFlags, Divert,
     DivertTarget,
     Error::*,
     List, ListDefinition, ListDefinitionsMap, ListItem, NativeFunction, Node,
     Object::{self, *},
-    Path, PathComponent, PushPopType, Story, Value, VariableAssignment, VariableReference,
+    Path, PathComponent, PushPopType, Result, Story, Value, VariableAssignment, VariableReference,
     VariableScope,
 };
-use failure::{bail, ensure, Fallible};
+use crate::{
+    CallStack, CallStackElement, Choice, InternStr, Pointer, SearchResult, StoryState, StringArena,
+    Thread, VariablesState,
+};
 use lazy_static::lazy_static;
 use log::{trace, warn};
 use serde_json::json;
@@ -126,14 +125,13 @@ lazy_static! {
 }
 
 /// Deserialize a `Story` from a JSON value.
-pub(crate) fn value_to_story(value: &serde_json::Value) -> Fallible<Story> {
+pub(crate) fn value_to_story(value: &serde_json::Value) -> Result<Story> {
     // Check format version
     let version = get_u64(value, "inkVersion")
         .ok_or_else(|| InvalidJsonFormat("missing ink format version".into()))?;
-    ensure!(
-        version <= CURRENT_FORMAT_VERSION && version >= MIN_FORMAT_VERSION,
-        UnsupportedVersion(version)
-    );
+    if version > CURRENT_FORMAT_VERSION || version < MIN_FORMAT_VERSION {
+        return Err(UnsupportedVersion(version));
+    }
     if version < CURRENT_FORMAT_VERSION {
         warn!(
             "ink format version {} is out of date; current version: {}",
@@ -172,24 +170,23 @@ pub(crate) fn value_to_story(value: &serde_json::Value) -> Fallible<Story> {
 /// Serialize a `Story` to a JSON value.
 pub(crate) fn story_to_value(story: &Story) -> serde_json::Value {
     json!({
-        "inkVersion": CURRENT_FORMAT_VERSION,
-        "root": container_to_value(story.root(), story, true),
-        "listDefs": list_definitions_to_value(&story.list_definitions, story),
-     })
+       "inkVersion": CURRENT_FORMAT_VERSION,
+       "root": container_to_value(story.root(), story, true),
+       "listDefs": list_definitions_to_value(&story.list_definitions, story),
+    })
 }
 
 /// Deserialize a `StoryState` from a JSON value.
 pub(crate) fn value_to_story_state<'story>(
     value: &serde_json::Value,
     story: &'story Story,
-) -> Fallible<StoryState<'story>> {
+) -> Result<StoryState<'story>> {
     // Check format version
     let version = get_u64(value, "inkSaveVersion")
         .ok_or_else(|| InvalidJsonFormat("missing ink save format version".into()))?;
-    ensure!(
-        version <= CURRENT_SAVE_STATE_VERSION && version >= MIN_SAVE_STATE_VERSION,
-        UnsupportedVersion(version)
-    );
+    if version > CURRENT_SAVE_STATE_VERSION || version < MIN_SAVE_STATE_VERSION {
+        return Err(UnsupportedVersion(version));
+    }
     if version < CURRENT_SAVE_STATE_VERSION {
         warn!(
             "ink save format version {} is out of date; current version: {}",
@@ -349,7 +346,7 @@ fn value_to_container(
     path: Path,
     string_arena: &mut StringArena,
     objects: &mut HashMap<Path, Object>,
-) -> Fallible<Container> {
+) -> Result<Container> {
     let array = into_array(value)?;
     if array.is_empty() {
         Ok(Container::default())
@@ -480,7 +477,7 @@ fn json_object_to_ink_object(
     value: &serde_json::Value,
     path: Path,
     string_arena: &mut StringArena,
-) -> Fallible<Object> {
+) -> Result<Object> {
     // Not really an easy way to do this
     Ok(
         // DivertTarget
@@ -593,10 +590,10 @@ fn json_object_to_ink_object(
                 origin_names,
             }))
         } else {
-            bail!(InvalidJsonFormat(format!(
+            return Err(InvalidJsonFormat(format!(
                 "unrecognized object value '{}'",
                 value
-            )))
+            )));
         },
     )
 }
@@ -608,7 +605,7 @@ fn value_to_ink_object(
     path: Path,
     string_arena: &mut StringArena,
     objects: &mut HashMap<Path, Object>,
-) -> Fallible<Object> {
+) -> Result<Object> {
     use serde_json::Value::*;
     Ok(match value {
         Number(n) => Value(
@@ -653,14 +650,14 @@ fn value_to_ink_object(
                 ))
             // Unrecognized strings
             } else {
-                bail!(InvalidJsonFormat(format!(
+                return Err(InvalidJsonFormat(format!(
                     "unrecognized string value '{}'",
                     s
-                )))
+                )));
             }
         }
-        Bool(_) => bail!(InvalidJsonFormat("unexpected boolean value".into())),
-        Null => bail!(InvalidJsonFormat("unexpected null value".into())),
+        Bool(_) => return Err(InvalidJsonFormat("unexpected boolean value".into())),
+        Null => return Err(InvalidJsonFormat("unexpected null value".into())),
     })
 }
 
@@ -777,7 +774,7 @@ fn ink_object_to_value(obj: &Object, story: &Story) -> serde_json::Value {
 fn value_to_list_definitions(
     value: &serde_json::Value,
     string_arena: &mut StringArena,
-) -> Fallible<ListDefinitionsMap> {
+) -> Result<ListDefinitionsMap> {
     if value.is_null() {
         Ok(ListDefinitionsMap::default())
     } else {
@@ -826,7 +823,7 @@ fn list_definitions_to_value(list_defs: &ListDefinitionsMap, story: &Story) -> s
 fn value_to_callstack<'story>(
     value: &serde_json::Value,
     story: &'story Story,
-) -> Fallible<CallStack<'story>> {
+) -> Result<CallStack<'story>> {
     let thread_counter = require_u32(value, "threadCounter")?;
 
     let thread_array = require_array(value, "threads")?;
@@ -853,7 +850,7 @@ fn callstack_to_value(callstack: &CallStack, story: &Story) -> serde_json::Value
 fn value_to_thread<'story>(
     value: &serde_json::Value,
     story: &'story Story,
-) -> Fallible<Thread<'story>> {
+) -> Result<Thread<'story>> {
     let index = require_u32(value, "threadIndex")?;
 
     let previous_pointer = get_path(
@@ -899,7 +896,7 @@ fn thread_to_value(thread: &Thread, story: &Story) -> serde_json::Value {
 fn value_to_callstack_element<'story>(
     value: &serde_json::Value,
     story: &'story Story,
-) -> Fallible<CallStackElement<'story>> {
+) -> Result<CallStackElement<'story>> {
     let stack_type = get_u64(value, "type")
         .and_then(|v| match v {
             0 => Some(PushPopType::Tunnel),
@@ -987,7 +984,7 @@ fn value_to_choice<'story>(
     story: &'story Story,
     callstack: &CallStack<'story>,
     choice_threads: Option<&serde_json::Map<String, serde_json::Value>>,
-) -> Fallible<Choice<'story>> {
+) -> Result<Choice<'story>> {
     let text = require_str(value, "text")?;
     let index = require_u32(value, "index")?;
     let source_path = require_path(
@@ -1035,7 +1032,7 @@ fn choice_to_value(choice: &Choice, story: &Story) -> serde_json::Value {
 //////// Helpers ////////
 
 /// Get the value of a key or return error.
-fn require<'a>(value: &'a serde_json::Value, key: &str) -> Fallible<&'a serde_json::Value> {
+fn require<'a>(value: &'a serde_json::Value, key: &str) -> Result<&'a serde_json::Value> {
     value
         .get(key)
         .ok_or_else(|| InvalidJsonFormat(format!("missing '{}'", key)).into())
@@ -1047,14 +1044,14 @@ fn get_i64(value: &serde_json::Value, key: &str) -> Option<i64> {
 }
 
 /// Convert a value into a number or return error.
-fn into_i64(value: &serde_json::Value) -> Fallible<i64> {
+fn into_i64(value: &serde_json::Value) -> Result<i64> {
     value
         .as_i64()
         .ok_or_else(|| InvalidJsonFormat(format!("expected integer value, got '{}'", value)).into())
 }
 
 /// Convert a value into a number or return error.
-fn into_i32(value: &serde_json::Value) -> Fallible<i32> {
+fn into_i32(value: &serde_json::Value) -> Result<i32> {
     Ok(into_i64(value)? as i32)
 }
 
@@ -1064,14 +1061,14 @@ fn get_u64(value: &serde_json::Value, key: &str) -> Option<u64> {
 }
 
 /// Get the number value of a key or return error.
-fn require_u64(value: &serde_json::Value, key: &str) -> Fallible<u64> {
+fn require_u64(value: &serde_json::Value, key: &str) -> Result<u64> {
     get_u64(value, key).ok_or_else(|| {
         InvalidJsonFormat(format!("expected unsigned integer value for '{}'", key)).into()
     })
 }
 
 /// Convert a value into a number or return error.
-fn into_u64(value: &serde_json::Value) -> Fallible<u64> {
+fn into_u64(value: &serde_json::Value) -> Result<u64> {
     value.as_u64().ok_or_else(|| {
         InvalidJsonFormat(format!("expected unsigned integer value, got '{}'", value)).into()
     })
@@ -1083,12 +1080,12 @@ fn get_u32(value: &serde_json::Value, key: &str) -> Option<u32> {
 }
 
 /// Get the number value of a key or return error.
-fn require_u32(value: &serde_json::Value, key: &str) -> Fallible<u32> {
+fn require_u32(value: &serde_json::Value, key: &str) -> Result<u32> {
     Ok(require_u64(value, key)? as u32)
 }
 
 /// Convert a value into a number or return error.
-fn into_u32(value: &serde_json::Value) -> Fallible<u32> {
+fn into_u32(value: &serde_json::Value) -> Result<u32> {
     Ok(into_u64(value)? as u32)
 }
 
@@ -1098,7 +1095,7 @@ fn get_str<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
 }
 
 /// Get the string value of a key or return error.
-fn require_str<'a>(value: &'a serde_json::Value, key: &str) -> Fallible<&'a str> {
+fn require_str<'a>(value: &'a serde_json::Value, key: &str) -> Result<&'a str> {
     get_str(value, key)
         .ok_or_else(|| InvalidJsonFormat(format!("expected string value for '{}'", key)).into())
 }
@@ -1113,7 +1110,7 @@ fn require_path(
     value: &serde_json::Value,
     key: &str,
     string_arena: &mut StringArena,
-) -> Fallible<Path> {
+) -> Result<Path> {
     get_path(value, key, string_arena).ok_or_else(|| {
         InvalidJsonFormat(format!("expected path string value for '{}'", key)).into()
     })
@@ -1131,13 +1128,13 @@ fn get_object<'a>(
 fn require_object<'a>(
     value: &'a serde_json::Value,
     key: &str,
-) -> Fallible<&'a serde_json::Map<String, serde_json::Value>> {
+) -> Result<&'a serde_json::Map<String, serde_json::Value>> {
     get_object(value, key)
         .ok_or_else(|| InvalidJsonFormat(format!("expected object value for '{}'", key)).into())
 }
 
 /// Convert a value into a map or return error.
-fn into_object(value: &serde_json::Value) -> Fallible<&serde_json::Map<String, serde_json::Value>> {
+fn into_object(value: &serde_json::Value) -> Result<&serde_json::Map<String, serde_json::Value>> {
     value
         .as_object()
         .ok_or_else(|| InvalidJsonFormat(format!("expected object value, got '{}'", value)).into())
@@ -1152,13 +1149,13 @@ fn get_array<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a Vec<serd
 fn require_array<'a>(
     value: &'a serde_json::Value,
     key: &str,
-) -> Fallible<&'a Vec<serde_json::Value>> {
+) -> Result<&'a Vec<serde_json::Value>> {
     get_array(value, key)
         .ok_or_else(|| InvalidJsonFormat(format!("expected array value for '{}'", key)).into())
 }
 
 /// Convert a value into an array or return error.
-fn into_array(value: &serde_json::Value) -> Fallible<&Vec<serde_json::Value>> {
+fn into_array(value: &serde_json::Value) -> Result<&Vec<serde_json::Value>> {
     value
         .as_array()
         .ok_or_else(|| InvalidJsonFormat(format!("expected array value, got '{}'", value)).into())
@@ -1170,7 +1167,7 @@ fn get_bool(value: &serde_json::Value, key: &str) -> Option<bool> {
 }
 
 /// Get the boolean value of a key or return error.
-fn require_bool(value: &serde_json::Value, key: &str) -> Fallible<bool> {
+fn require_bool(value: &serde_json::Value, key: &str) -> Result<bool> {
     get_bool(value, key)
         .ok_or_else(|| InvalidJsonFormat(format!("expected boolean value for '{}'", key)).into())
 }

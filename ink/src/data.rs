@@ -1,28 +1,32 @@
 use super::{InternStr, Pointer, SearchResult, StringArena};
 use bitflags::bitflags;
 use encoding_rs_io::DecodeReaderBytes;
-use failure::{Fail, Fallible};
 use log::{error, warn};
 use std::{
     cell::{Ref, RefCell},
     collections::HashMap,
     io::{Read, Write},
 };
+use thiserror::Error;
 
 pub(crate) mod json;
 mod path;
 
 pub(crate) use path::{Path, PathComponent};
 
-#[derive(Debug, Fail)]
+#[derive(Debug, Error)]
 pub enum Error {
-    #[fail(display = "invalid format: {}", _0)]
+    #[error("invalid format: {0}")]
     InvalidJsonFormat(String),
-    #[fail(display = "unsupported ink format version: {}", _0)]
+    #[error("unsupported ink format version: {0}")]
     UnsupportedVersion(u64),
-    #[fail(display = "story path not found: '{}'", _0)]
+    #[error("story path not found: '{0}'")]
     PathNotFound(String),
+    #[error(transparent)]
+    JsonError(#[from] serde_json::Error),
 }
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone)]
 pub struct Story {
@@ -272,18 +276,18 @@ bitflags! {
 }
 
 impl Story {
-    pub fn read_json<R: Read>(reader: R) -> Fallible<Self> {
+    pub fn read_json<R: Read>(reader: R) -> Result<Self> {
         let decoder = DecodeReaderBytes::new(reader);
         let value = serde_json::from_reader(decoder)?;
         Ok(json::value_to_story(&value)?)
     }
 
-    pub fn from_json_str(s: &str) -> Fallible<Self> {
+    pub fn from_json_str(s: &str) -> Result<Self> {
         let value = serde_json::from_str(s)?;
         Ok(json::value_to_story(&value)?)
     }
 
-    pub fn write_json<W: Write>(&self, writer: W) -> Fallible<()> {
+    pub fn write_json<W: Write>(&self, writer: W) -> Result<()> {
         serde_json::to_writer(writer, &json::story_to_value(self))?;
         Ok(())
     }
@@ -647,16 +651,17 @@ impl ContainedNode for VariableAssignment {
 #[cfg(test)]
 mod test {
     use super::*;
+    use anyhow::Result;
     use std::fs::File;
 
     #[test]
-    fn read_json() -> Fallible<()> {
+    fn read_json() -> Result<()> {
         let _story = Story::read_json(File::open("../examples/stories/TheIntercept.ink.json")?)?;
         Ok(())
     }
 
     #[test]
-    fn write_json() -> Fallible<()> {
+    fn write_json() -> Result<()> {
         let mut decoder =
             DecodeReaderBytes::new(File::open("../examples/stories/TheIntercept.ink.json")?);
         let mut s = String::new();

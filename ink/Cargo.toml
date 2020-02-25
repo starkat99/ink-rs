@@ -6,12 +6,15 @@ authors = ["Kathryn Long <squeeself@gmail.com>"]
 publish = false
 
 [dependencies]
-serde = "1.0"
-serde_derive = "1.0"
-serde_json = "1.0"
-log = "0.4.1"
-failure = "0.1.2"
-bitflags = "1.0"
-encoding_rs_io = "0.1.2"
+serde = "1"
+serde_derive = "1"
+serde_json = "1"
+log = "0.4"
+thiserror = "1"
+bitflags = "1"
+encoding_rs_io = "0.1"
 string-interner = "0.7"
-lazy_static = "1.1"
+lazy_static = "1"
+
+[dev-dependencies]
+anyhow = "1"
