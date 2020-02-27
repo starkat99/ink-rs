@@ -258,20 +258,20 @@ pub(crate) struct VariableAssignment {
 bitflags! {
     #[derive(Default)]
     pub(crate) struct CountFlags: u32 {
-        const Visits = 0x1;
-        const Turns = 0x2;
-        const CountStartOnly = 0x4;
+        const VISITS = 0x1;
+        const TURNS = 0x2;
+        const COUNT_START_ONLY = 0x4;
     }
 }
 
 bitflags! {
     #[derive(Default)]
     pub(crate) struct ChoiceFlags: u32 {
-        const Condition = 0x01;
-        const StartContent = 0x02;
-        const ChoiceOnlyContent = 0x04;
-        const InvisibleDefault = 0x08;
-        const OnceOnly = 0x10;
+        const CONDITION = 0x01;
+        const START_CONTENT = 0x02;
+        const CHOICE_ONLY_CONTENT = 0x04;
+        const INVISIBLE_DEFAULT = 0x08;
+        const ONCE_ONLY = 0x10;
     }
 }
 
